@@ -11,17 +11,16 @@ Example: BCSS__uni_v1__seed2025
 Author: @chenwm
 """
 
-import os
-import sys
-import json
-import subprocess
 import argparse
-import time
-from pathlib import Path
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+import json
+import os
+import subprocess
 import threading
+import time
 from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 # ==========================================
 # 配置区域
@@ -39,7 +38,7 @@ CONDA_ENV_NAME = "pfm_seg"
 
 # 需要使用 resize_14 的模型列表
 RESIZE_14_MODELS = {
-    'virchow_v1', 'virchow_v2', 'uni_v2', 'midnight12k', 
+    'virchow_v1', 'virchow_v2', 'uni_v2', 'midnight12k',
     'kaiko-vitl14', 'hibou_l', 'hoptimus_0', 'hoptimus_1'
 }
 
@@ -89,7 +88,7 @@ def parse_args() -> argparse.Namespace:
   python batch_infer_bootstrap.py --input_dir /path/to/models --dry_run
         """
     )
-    
+
     parser.add_argument('--input_dir', type=str, default="/mnt/sdb/chenwm/PFM_Segmentation_Output/logs_frozen_01_11",
                         help='包含训练好模型文件夹的目录路径')
     parser.add_argument('--output_base_dir', type=str, default=OUTPUT_BASE_DIR,
@@ -98,7 +97,7 @@ def parse_args() -> argparse.Namespace:
                         help=f'数据集JSON文件目录 (默认: {DATASET_JSON_DIR})')
     parser.add_argument('--size_info_path', type=str, default=SIZE_INFO_PATH,
                         help=f'数据集尺寸信息JSON路径 (默认: {SIZE_INFO_PATH})')
-    
+
     # GPU调度参数
     parser.add_argument('--gpus', type=int, nargs='+', default=DEFAULT_AVAILABLE_GPUS,
                         help=f'可用GPU列表 (默认: {DEFAULT_AVAILABLE_GPUS})')
@@ -112,20 +111,20 @@ def parse_args() -> argparse.Namespace:
                         help=f'GPU满载时的等待时间(秒) (默认: {DEFAULT_WAIT_TIME_FULL})')
     parser.add_argument('--wait_time_after_start', type=int, default=DEFAULT_WAIT_TIME_AFTER_START,
                         help=f'进程启动后的等待时间(秒) (默认: {DEFAULT_WAIT_TIME_AFTER_START})')
-    
+
     # 推理参数
     parser.add_argument('--batch_size', type=int, default=2,
                         help='推理batch size (默认: 8)')
     parser.add_argument('--n_bootstrap', type=int, default=1000,
                         help='Bootstrap迭代次数 (默认: 1000)')
-    parser.add_argument('--resize_or_windowslide', type=str, 
+    parser.add_argument('--resize_or_windowslide', type=str,
                         choices=['resize', 'windowslide'], default='resize',
                         help='推理模式 (默认: resize)')
     parser.add_argument('--save_vis', default=True,
                         help='保存推理可视化结果 (masks和overlays)')
     parser.add_argument('--max_save_per_task', type=int, default=20,
                         help='每个任务最多保存的可视化样本数 (默认: 20)')
-    
+
     # 其他参数
     parser.add_argument('--dry_run', action='store_true',
                         help='只打印任务列表，不执行')
@@ -139,7 +138,7 @@ def parse_args() -> argparse.Namespace:
                         help='跳过指定的数据集')
     parser.add_argument('--skip_models', type=str, nargs='+', default=None,
                         help='跳过指定的模型')
-    
+
     return parser.parse_args()
 
 
@@ -163,7 +162,7 @@ def parse_folder_name(folder_name: str) -> Optional[Tuple[str, str, int, Optiona
         extra 为 None 表示普通frozen训练
     """
     parts = folder_name.split('__')
-    
+
     if len(parts) == 3:
         # 格式: {dataset}__{model}__seed{seed}
         dataset_name = parts[0]
@@ -178,7 +177,7 @@ def parse_folder_name(folder_name: str) -> Optional[Tuple[str, str, int, Optiona
         seed_part = parts[3]
     else:
         return None
-    
+
     # 解析seed
     if not seed_part.startswith('seed'):
         return None
@@ -186,7 +185,7 @@ def parse_folder_name(folder_name: str) -> Optional[Tuple[str, str, int, Optiona
         seed = int(seed_part[4:])  # 去掉 'seed' 前缀
     except ValueError:
         return None
-    
+
     return dataset_name, model_name, seed, extra
 
 
@@ -209,14 +208,14 @@ def get_input_size(dataset_name: str, model_name: str, size_info: Dict, extra: O
             return int(extra[6:])  # 去掉 'resize' 前缀，提取数字
         except ValueError:
             pass  # 解析失败，继续使用默认逻辑
-    
+
     if dataset_name not in size_info:
         return None
-    
+
     # musk模型使用固定尺寸
     if model_name == 'musk':
         return MUSK_SIZE
-    
+
     # 根据模型选择resize_14或resize_16
     if model_name in RESIZE_14_MODELS:
         return size_info[dataset_name].get('resize_14')
@@ -284,82 +283,82 @@ def discover_tasks(
     tasks = []
     input_path = Path(input_dir)
     parent_folder_name = input_path.name  # 父目录名称
-    
+
     if not input_path.exists():
         print(f"错误: 输入目录不存在: {input_dir}")
         return tasks
-    
+
     # 遍历所有子文件夹
     for folder in sorted(input_path.iterdir()):
         if not folder.is_dir():
             continue
-        
+
         folder_name = folder.name
-        
+
         # 解析文件夹名称
         parsed = parse_folder_name(folder_name)
         if parsed is None:
             print(f"  跳过: {folder_name} (无法解析文件夹名称格式)")
             continue
-        
+
         dataset_name, model_name, seed, extra = parsed
-        
+
         # 应用过滤器
         if filter_dataset and dataset_name not in filter_dataset:
             print(f"  跳过: {folder_name} (不在指定数据集列表中)")
             continue
-        
+
         if filter_model and model_name not in filter_model:
             print(f"  跳过: {folder_name} (不在指定模型列表中)")
             continue
-        
+
         if skip_datasets and dataset_name in skip_datasets:
             print(f"  跳过: {folder_name} (在排除数据集列表中)")
             continue
-        
+
         if skip_models and model_name in skip_models:
             print(f"  跳过: {folder_name} (在排除模型列表中)")
             continue
-        
+
         # 查找input_json
         input_json = os.path.join(dataset_json_dir, f"{dataset_name}.json")
         if not os.path.isfile(input_json):
             print(f"  跳过: {folder_name} (未找到数据集JSON: {input_json})")
             continue
-        
+
         # 检查训练是否完成（通过 training_history.png 判断）
         if not check_training_completed(str(folder)):
             print(f"  跳过: {folder_name} (训练未完成，未找到 training_history.png)")
             continue
-        
+
         # 查找checkpoint目录
         checkpoint_dir = find_checkpoint_dir(str(folder))
         if checkpoint_dir is None:
             print(f"  跳过: {folder_name} (未找到checkpoints目录)")
             continue
-        
+
         # 查找config.yaml
         config_path = find_config_file(str(folder))
         if config_path is None:
             print(f"  跳过: {folder_name} (未找到config.yaml)")
             continue
-        
+
         # 获取input_size
         input_size = get_input_size(dataset_name, model_name, size_info, extra)
         if input_size is None:
             print(f"  跳过: {folder_name} (未找到数据集尺寸信息)")
             continue
-        
+
         # 构建output_dir: output_base_dir / parent_folder_name / folder_name
         output_dir = os.path.join(output_base_dir, parent_folder_name, folder_name)
-        
+
         # 检查是否跳过已存在的
         if skip_existing and os.path.exists(output_dir):
             metrics_file = os.path.join(output_dir, 'bootstrap_metrics.json')
             if os.path.isfile(metrics_file):
                 print(f"  跳过: {folder_name} (输出已存在)")
                 continue
-        
+
         # 创建任务
         task = InferenceTask(
             folder_name=folder_name,
@@ -378,7 +377,7 @@ def discover_tasks(
         tasks.append(task)
         extra_info = f" [{extra}]" if extra else ""
         print(f"  发现: {folder_name}{extra_info}")
-    
+
     return tasks
 
 
@@ -386,7 +385,7 @@ def build_command(task: InferenceTask, args: argparse.Namespace, gpu_id: int) ->
     """构建推理命令"""
     # 构建 conda 激活命令
     conda_activate = f"source $(conda info --base)/etc/profile.d/conda.sh && conda activate {CONDA_ENV_NAME} &&"
-    
+
     cmd_parts = [
         conda_activate,
         f"CUDA_VISIBLE_DEVICES={gpu_id}",
@@ -403,12 +402,12 @@ def build_command(task: InferenceTask, args: argparse.Namespace, gpu_id: int) ->
         f"--n_bootstrap {args.n_bootstrap}",
         f"--resize_or_windowslide {args.resize_or_windowslide}"
     ]
-    
+
     # 添加可视化保存参数
     if args.save_vis:
         cmd_parts.append("--save_vis")
         cmd_parts.append(f"--max_save_per_task {args.max_save_per_task}")
-    
+
     return " ".join(cmd_parts)
 
 
@@ -428,8 +427,8 @@ def get_gpu_free_memory(gpu_id: int) -> int:
 
 class GPUScheduler:
     """GPU调度器"""
-    
-    def __init__(self, gpus: List[int], max_per_gpu: int, max_total: int, 
+
+    def __init__(self, gpus: List[int], max_per_gpu: int, max_total: int,
                  min_free_memory: int):
         self.gpus = gpus
         self.max_per_gpu = max_per_gpu
@@ -437,62 +436,62 @@ class GPUScheduler:
         self.min_free_memory = min_free_memory
         self.gpu_processes: Dict[int, List[subprocess.Popen]] = {gpu: [] for gpu in gpus}
         self.lock = threading.Lock()
-    
+
     def _cleanup_finished(self):
         """清理已完成的进程"""
         for gpu in self.gpus:
             self.gpu_processes[gpu] = [
-                p for p in self.gpu_processes[gpu] 
+                p for p in self.gpu_processes[gpu]
                 if p.poll() is None
             ]
-    
+
     def get_total_running(self) -> int:
         """获取总运行进程数"""
         with self.lock:
             self._cleanup_finished()
             return sum(len(procs) for procs in self.gpu_processes.values())
-    
+
     def get_gpu_load(self, gpu: int) -> int:
         """获取指定GPU的负载（运行进程数）"""
         with self.lock:
             self._cleanup_finished()
             return len(self.gpu_processes[gpu])
-    
+
     def select_gpu(self) -> Optional[int]:
         """选择最合适的GPU"""
         with self.lock:
             self._cleanup_finished()
-            
+
             # 检查总进程数
             total = sum(len(procs) for procs in self.gpu_processes.values())
             if total >= self.max_total:
                 return None
-            
+
             # 寻找负载最小且满足条件的GPU
             best_gpu = None
             min_load = float('inf')
-            
+
             for gpu in self.gpus:
                 load = len(self.gpu_processes[gpu])
                 if load >= self.max_per_gpu:
                     continue
-                
+
                 # 检查显存
                 free_mem = get_gpu_free_memory(gpu)
                 if free_mem < self.min_free_memory:
                     continue
-                
+
                 if load < min_load:
                     min_load = load
                     best_gpu = gpu
-            
+
             return best_gpu
-    
+
     def register_process(self, gpu: int, process: subprocess.Popen):
         """注册新进程"""
         with self.lock:
             self.gpu_processes[gpu].append(process)
-    
+
     def wait_all(self):
         """等待所有进程完成"""
         all_procs = []
@@ -511,7 +510,7 @@ def run_tasks(tasks: List[InferenceTask], args: argparse.Namespace) -> Dict[str,
     """
     # 创建日志目录
     os.makedirs(TASK_LOG_DIR, exist_ok=True)
-    
+
     # 初始化调度器
     scheduler = GPUScheduler(
         gpus=args.gpus,
@@ -519,22 +518,22 @@ def run_tasks(tasks: List[InferenceTask], args: argparse.Namespace) -> Dict[str,
         max_total=args.max_total,
         min_free_memory=args.min_free_memory
     )
-    
+
     results = {
         'success': [],
         'failed': [],
         'log_files': []
     }
-    
+
     print("\n" + "=" * 60)
     print(f"开始调度任务，共 {len(tasks)} 个任务...")
     print(f"可用GPU: {args.gpus}")
     print(f"限制: 每个GPU最多 {args.max_per_gpu} 个进程，总共最多 {args.max_total} 个进程")
     print(f"显存要求: 每个GPU剩余显存必须大于 {args.min_free_memory // 1024}G ({args.min_free_memory} MB)")
     print("=" * 60 + "\n")
-    
+
     task_processes = []  # (task, process, log_file)
-    
+
     for i, task in enumerate(tasks):
         while True:
             gpu = scheduler.select_gpu()
@@ -543,22 +542,22 @@ def run_tasks(tasks: List[InferenceTask], args: argparse.Namespace) -> Dict[str,
                 cmd = build_command(task, args, gpu)
                 free_mem = get_gpu_free_memory(gpu)
                 load = scheduler.get_gpu_load(gpu)
-                
+
                 print(f"[任务 {i+1}/{len(tasks)}] 分配到 GPU {gpu} "
                       f"(负载: {load}/{args.max_per_gpu}, 剩余显存: {free_mem // 1024}G)")
                 print(f"  任务: {task.folder_name}")
                 print(f"  命令: {cmd[:100]}...")
-                
+
                 # 创建日志文件
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
                 log_file = os.path.join(
-                    TASK_LOG_DIR, 
+                    TASK_LOG_DIR,
                     f"bootstrap_{i}_gpu{gpu}_{task.folder_name}_{timestamp}.log"
                 )
-                
+
                 # 创建输出目录
                 os.makedirs(task.output_dir, exist_ok=True)
-                
+
                 # 启动进程 (使用 bash 以支持 conda activate)
                 with open(log_file, 'w') as f:
                     process = subprocess.Popen(
@@ -569,31 +568,31 @@ def run_tasks(tasks: List[InferenceTask], args: argparse.Namespace) -> Dict[str,
                         stderr=subprocess.STDOUT,
                         stdin=subprocess.DEVNULL
                     )
-                
+
                 scheduler.register_process(gpu, process)
                 task_processes.append((task, process, log_file))
                 results['log_files'].append(log_file)
-                
+
                 print(f"  -> 日志文件: {log_file} (PID: {process.pid})")
-                
+
                 # 等待一段时间让进程占用显存
                 time.sleep(args.wait_time_after_start)
                 break
             else:
                 # 所有GPU都满了，等待
                 time.sleep(args.wait_time_full)
-    
+
     # 等待所有进程完成
     print("\n所有任务已启动，等待后台进程完成...")
     print(f"日志文件保存在: {TASK_LOG_DIR}")
-    
+
     scheduler.wait_all()
-    
+
     # 检查结果
     print("\n" + "=" * 60)
     print("检查任务结果...")
     print("=" * 60)
-    
+
     for task, process, log_file in task_processes:
         if process.returncode == 0:
             # 还需要检查输出文件是否存在
@@ -607,7 +606,7 @@ def run_tasks(tasks: List[InferenceTask], args: argparse.Namespace) -> Dict[str,
         else:
             results['failed'].append(task.folder_name)
             print(f"✗ 失败: {task.folder_name} (返回码: {process.returncode})")
-    
+
     return results
 
 
@@ -616,37 +615,37 @@ def print_summary(tasks: List[InferenceTask], results: Optional[Dict] = None):
     print("\n" + "=" * 60)
     print("任务摘要")
     print("=" * 60)
-    
+
     # 按数据集、模型和实验类型统计
     by_dataset = defaultdict(list)
     by_model = defaultdict(list)
     by_extra = defaultdict(list)
-    
+
     for task in tasks:
         by_dataset[task.dataset_name].append(task)
         by_model[task.model_name].append(task)
         extra_type = task.extra if task.extra else "frozen"
         by_extra[extra_type].append(task)
-    
+
     print(f"\n总任务数: {len(tasks)}")
-    
+
     print(f"\n按数据集统计 ({len(by_dataset)} 个数据集):")
     for ds, ds_tasks in sorted(by_dataset.items()):
         print(f"  {ds}: {len(ds_tasks)} 个任务")
-    
+
     print(f"\n按模型统计 ({len(by_model)} 个模型):")
     for model, model_tasks in sorted(by_model.items()):
         print(f"  {model}: {len(model_tasks)} 个任务")
-    
+
     print(f"\n按实验类型统计 ({len(by_extra)} 种类型):")
     for extra_type, extra_tasks in sorted(by_extra.items()):
         print(f"  {extra_type}: {len(extra_tasks)} 个任务")
-    
+
     if results:
         print(f"\n执行结果:")
         print(f"  成功: {len(results['success'])} 个")
         print(f"  失败: {len(results['failed'])} 个")
-        
+
         if results['failed']:
             print(f"\n失败的任务:")
             for name in results['failed']:
@@ -656,7 +655,7 @@ def print_summary(tasks: List[InferenceTask], results: Optional[Dict] = None):
 def main():
     """主函数"""
     args = parse_args()
-    
+
     print("=" * 60)
     print("Batch Bootstrap Inference Script")
     print("=" * 60)
@@ -664,12 +663,12 @@ def main():
     print(f"输出基础目录: {args.output_base_dir}")
     print(f"数据集JSON目录: {args.dataset_json_dir}")
     print(f"尺寸信息文件: {args.size_info_path}")
-    
+
     # 加载尺寸信息
     print("\n加载数据集尺寸信息...")
     size_info = load_size_info(args.size_info_path)
     print(f"  已加载 {len(size_info)} 个数据集的尺寸信息")
-    
+
     # 发现任务
     print(f"\n扫描目录: {args.input_dir}")
     tasks = discover_tasks(
@@ -683,14 +682,14 @@ def main():
         skip_models=args.skip_models,
         skip_existing=args.skip_existing
     )
-    
+
     if not tasks:
         print("\n未发现任何有效任务!")
         return
-    
+
     # 打印任务摘要
     print_summary(tasks)
-    
+
     # Dry run模式
     if args.dry_run:
         print("\n[DRY RUN] 以下是将要执行的命令:")
@@ -701,13 +700,13 @@ def main():
             print(f"    {cmd}")
         print("\n[DRY RUN] 实际执行时会根据GPU负载自动分配")
         return
-    
+
     # 执行任务
     results = run_tasks(tasks, args)
-    
+
     # 打印最终摘要
     print_summary(tasks, results)
-    
+
     print("\n" + "=" * 60)
     print("所有任务执行完毕！")
     print("=" * 60)

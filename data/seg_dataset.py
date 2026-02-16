@@ -1,16 +1,63 @@
 """
-Simplified JSON-based dataset class
+JSON-based dataset class for semantic and instance segmentation.
 
-Supports basic img_path and mask_path format, designed for semantic segmentation tasks.
+Supports basic img_path and mask_path format for semantic segmentation,
+and optional instance_map_path for HoVer-Net-style instance segmentation.
 """
 
-import os
 import json
-import torch
-from torch.utils.data import Dataset
-from PIL import Image
+import logging
+import os
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
 import numpy as np
-from typing import Dict, List, Optional, Callable
+import torch
+from PIL import Image
+from torch.utils.data import Dataset
+
+logger = logging.getLogger(__name__)
+
+
+def instance_map_to_binary(instance_map: np.ndarray) -> np.ndarray:
+    """Convert instance map to binary foreground/background mask.
+
+    Args:
+        instance_map: (H, W) int array with unique instance IDs, 0=background.
+
+    Returns:
+        (H, W) int64 array, 0=background, 1=foreground.
+    """
+    return (instance_map > 0).astype(np.int64)
+
+
+def instance_map_to_hv(instance_map: np.ndarray) -> np.ndarray:
+    """Convert instance map to horizontal-vertical distance maps.
+
+    For each instance, computes normalized signed distance from each pixel
+    to the instance centroid: horizontal (x) and vertical (y), in [-1, 1].
+
+    Args:
+        instance_map: (H, W) int array with unique instance IDs, 0=background.
+
+    Returns:
+        (H, W, 2) float32 array. Channel 0=horizontal, channel 1=vertical.
+    """
+    h, w = instance_map.shape
+    hv = np.zeros((h, w, 2), dtype=np.float32)
+    inst_ids = np.unique(instance_map)
+    inst_ids = inst_ids[inst_ids > 0]
+
+    for inst_id in inst_ids:
+        mask = instance_map == inst_id
+        ys, xs = np.where(mask)
+        cy, cx = ys.mean(), xs.mean()
+        y_half = max((ys.max() - ys.min()) / 2.0, 1.0)
+        x_half = max((xs.max() - xs.min()) / 2.0, 1.0)
+        hv[ys, xs, 0] = (xs - cx) / x_half
+        hv[ys, xs, 1] = (ys - cy) / y_half
+
+    return hv
 
 
 class JSONSegmentationDataset(Dataset):
@@ -35,27 +82,31 @@ class JSONSegmentationDataset(Dataset):
         split (str): Dataset split ('train', 'val', or 'test').
         transform (Optional[Callable]): Data transformation/augmentation function.
     """
-    
+
     def __init__(self, json_file: str, split: str = 'train',
                  transform: Optional[Callable] = None):
         self.json_file = json_file
         self.split = split
         self.transform = transform
-        
+
         # Load JSON configuration
         self.config = self._load_json_config()
-        
+
         # Extract basic info
         self.num_classes = self.config.get('num_classes')
         self.ignore_index = 255  # fixed ignore label
         # Load data entries
         self.data_items = self._load_data_items()
-        self.fixed_size = self._check_fixed_size()        
+        self.fixed_size = self._check_fixed_size()
         self.has_mask = self._check_has_mask()
         if not self.has_mask:
             self._reset_mask()
-        print(f"Dataset loaded: split = {split}, samples = {len(self.data_items)}, classes = {self.num_classes}")
-        
+        self.has_instance_targets = self._check_has_instance_targets()
+        logger.info(
+            f"Dataset loaded: split={split}, samples={len(self.data_items)}, "
+            f"classes={self.num_classes}, instance_seg={self.has_instance_targets}"
+        )
+
     def _load_json_config(self) -> Dict:
         """Load the JSON config file."""
         try:
@@ -84,8 +135,8 @@ class JSONSegmentationDataset(Dataset):
             item['mask_path'] = None
             new_items.append(item)
         self.data_items = new_items
-            
-        
+
+
     def _check_fixed_size(self) -> bool:
         """Check if the dataset has a fixed image size."""
         _img_size = None
@@ -97,100 +148,136 @@ class JSONSegmentationDataset(Dataset):
                 elif _img_size != img.size:
                     return False
         return True
-    
+
     def _load_data_items(self) -> List[Dict]:
         """Load the data entries for the given split."""
         data_config = self.config.get('data')
         split_data = data_config.get(self.split)
-        
+
         if not split_data:
             raise ValueError(f"No data found for split '{self.split}'")
-        
+
         processed_items = []
         for item in split_data:
             processed_item = self._process_data_item(item)
             if processed_item:
                 processed_items.append(processed_item)
-        
+
         if not processed_items:
             raise ValueError(f"No valid items found in split '{self.split}'")
-            
+
         return processed_items
-    
+
+    def _check_has_instance_targets(self) -> bool:
+        """Check if entries have valid instance map paths."""
+        for item in self.data_items:
+            inst_path = item.get('instance_map_path')
+            if not inst_path or not Path(inst_path).exists():
+                return False
+        return True
+
     def _process_data_item(self, item: Dict) -> Optional[Dict]:
         """Process a single data entry."""
         img_path = item.get('image_path', '')
         mask_path = item.get('mask_path', None)
-        
+
         if not img_path or not mask_path:
             if self.split == 'train' or self.split == 'val':
-                print(f"Missing image or mask path: {item}")
+                logger.warning(f"Missing image or mask path: {item}")
                 return None
-        
-        return {
+
+        result = {
             'img_path': img_path,
-            'mask_path': mask_path
+            'mask_path': mask_path,
         }
-    
+        instance_map_path = item.get('instance_map_path', None)
+        if instance_map_path:
+            result['instance_map_path'] = instance_map_path
+        return result
+
     def __len__(self) -> int:
         """Return the dataset size."""
         return len(self.data_items)
-    
+
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         """
         Retrieve a single data entry.
-        
+
         Args:
             index (int): Index of the data item
-            
+
         Returns:
-            Dict[str, torch.Tensor]: Dictionary containing image and label tensors
+            Dict[str, torch.Tensor]: Dictionary containing image and label tensors,
+                plus optional binary_mask and hv_map for instance segmentation.
         """
         item = self.data_items[index]
-        
+
         image = Image.open(item['img_path']).convert('RGB')
         ori_size = image.size
-        
+
         if self.has_mask:
             mask = Image.open(item['mask_path'])
             if mask.mode != 'L':
                 mask = mask.convert('L')
-            # 确保掩码尺寸与图像一致
             if mask.size != image.size:
-                print(f"Warning: Resizing mask to match image size for {item['mask_path']}")
-                print(f"Image size: {image.size}, Mask size: {mask.size}")
+                logger.warning(
+                    f"Resizing mask to match image size for {item['mask_path']} "
+                    f"(image={image.size}, mask={mask.size})"
+                )
                 mask = mask.resize(image.size, Image.Resampling.NEAREST)
             mask = np.array(mask, dtype=np.int64)
         else:
             mask = np.ones((ori_size[1],ori_size[0]), dtype=np.int64) * (-1)
-        
+
         # Validate mask values (should be within [0, num_classes-1] or 255 as ignore index)
         unique_values = np.unique(mask)
         valid_values = set(range(self.num_classes)) | {self.ignore_index}
         invalid_values = set(unique_values) - valid_values
-        
+
         if invalid_values and self.has_mask:
-            print(f"Invalid label values {invalid_values} found in {item['mask_path']}")
+            logger.warning(f"Invalid label values {invalid_values} found in {item['mask_path']}")
             for invalid_val in invalid_values:
                 mask[mask == invalid_val] = self.ignore_index
-        
+
+        # Load instance map if available
+        instance_map = None
+        if self.has_instance_targets:
+            instance_map = np.load(item['instance_map_path']).astype(np.int64)
+
         # Apply transformation
         if self.transform:
-            transformed = self.transform(image=np.array(image), mask=mask)
+            if instance_map is not None:
+                transformed = self.transform(
+                    image=np.array(image), mask=mask, instance_map=instance_map,
+                )
+                instance_map = transformed['instance_map']
+            else:
+                transformed = self.transform(image=np.array(image), mask=mask)
             image = transformed['image']
             mask = transformed['mask']
         else:
             image = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
             mask = torch.from_numpy(mask).long()
-        
-        return {
+
+        result = {
             'image': image,
             'label': mask,
             'ori_size': ori_size,
             'image_path': item['img_path'],
-            'label_path': item['mask_path']
+            'label_path': item['mask_path'],
         }
-    
+
+        # Derive binary mask and HV map from augmented instance map
+        if instance_map is not None:
+            if isinstance(instance_map, torch.Tensor):
+                instance_map = instance_map.numpy()
+            binary_mask = instance_map_to_binary(instance_map)
+            hv_map = instance_map_to_hv(instance_map)
+            result['binary_mask'] = torch.from_numpy(binary_mask).long()
+            result['hv_map'] = torch.from_numpy(hv_map).permute(2, 0, 1).float()
+
+        return result
+
     def get_class_weights(self) -> torch.Tensor:
         """
         Compute class weights to handle class imbalance.
@@ -199,26 +286,26 @@ class JSONSegmentationDataset(Dataset):
             torch.Tensor: Computed class weights
         """
         print("Computing class weights...")
-        
+
         class_counts = np.zeros(self.num_classes)
         total_pixels = 0
-        
+
         for item in self.data_items:
             mask = Image.open(item['mask_path'])
             if mask.mode != 'L':
                 mask = mask.convert('L')
             mask_array = np.array(mask)
-            
+
             for class_id in range(self.num_classes):
                 class_counts[class_id] += np.sum(mask_array == class_id)
-            
+
             valid_pixels = mask_array != self.ignore_index
             total_pixels += np.sum(valid_pixels)
-        
+
         class_counts = np.maximum(class_counts, 1)
         weights = total_pixels / (self.num_classes * class_counts)
         weights = weights / weights.sum() * self.num_classes
-        
+
         print(f"Class weights: {weights}")
         return torch.from_numpy(weights).float()
 

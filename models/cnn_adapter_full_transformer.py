@@ -10,15 +10,14 @@ Reference: TransUNet (https://arxiv.org/abs/2102.04306)
 Author: @chenwm
 """
 
-import math
 import logging
 from collections import OrderedDict
-from typing import Tuple, List, Optional
+from typing import List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ class StdConv2d(nn.Conv2d):
     Standard convolution with weight standardization.
     Weight standardization improves training stability and convergence.
     """
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         w = self.weight
         v, m = torch.var_mean(w, dim=[1, 2, 3], keepdim=True, unbiased=False)
@@ -133,7 +132,7 @@ class ResNetV2Adapter(nn.Module):
         output_channels (int): Number of output channels to match ViT input
     """
 
-    def __init__(self, in_channels: int = 3, width_factor: float = 1, 
+    def __init__(self, in_channels: int = 3, width_factor: float = 1,
                  block_units: Tuple[int, ...] = (3, 4, 9), output_channels: int = None):
         super().__init__()
         width = int(64 * width_factor)
@@ -152,21 +151,21 @@ class ResNetV2Adapter(nn.Module):
         self.body = nn.Sequential(OrderedDict([
             ('block1', nn.Sequential(OrderedDict(
                 [('unit1', PreActBottleneck(cin=width, cout=width*4, cmid=width))] +
-                [(f'unit{i:d}', PreActBottleneck(cin=width*4, cout=width*4, cmid=width)) 
+                [(f'unit{i:d}', PreActBottleneck(cin=width*4, cout=width*4, cmid=width))
                  for i in range(2, block_units[0] + 1)],
             ))),
             ('block2', nn.Sequential(OrderedDict(
                 [('unit1', PreActBottleneck(cin=width*4, cout=width*8, cmid=width*2, stride=2))] +
-                [(f'unit{i:d}', PreActBottleneck(cin=width*8, cout=width*8, cmid=width*2)) 
+                [(f'unit{i:d}', PreActBottleneck(cin=width*8, cout=width*8, cmid=width*2))
                  for i in range(2, block_units[1] + 1)],
             ))),
             ('block3', nn.Sequential(OrderedDict(
                 [('unit1', PreActBottleneck(cin=width*8, cout=width*16, cmid=width*4, stride=2))] +
-                [(f'unit{i:d}', PreActBottleneck(cin=width*16, cout=width*16, cmid=width*4)) 
+                [(f'unit{i:d}', PreActBottleneck(cin=width*16, cout=width*16, cmid=width*4))
                  for i in range(2, block_units[2] + 1)],
             ))),
         ]))
-        
+
         # Output projection to match ViT embedding dimension if specified
         self.output_proj = None
         if output_channels is not None:
@@ -190,14 +189,14 @@ class ResNetV2Adapter(nn.Module):
         """
         features = []
         b, c, in_size, _ = x.size()
-        
+
         # Root block: 1/2 scale
         x = self.root(x)
         features.append(x)  # 1/2 scale, width channels
-        
+
         # MaxPool: 1/4 scale (padding=0 to match original TransUNet)
         x = nn.MaxPool2d(kernel_size=3, stride=2, padding=0)(x)
-        
+
         # Block 1: 1/4 scale
         x = self.body.block1(x)
         # Handle potential size mismatch due to padding=0 MaxPool (following original TransUNet)
@@ -210,7 +209,7 @@ class ResNetV2Adapter(nn.Module):
         else:
             feat = x
         features.append(feat)  # 1/4 scale, width*4 channels
-        
+
         # Block 2: 1/8 scale
         x = self.body.block2(x)
         right_size = int(in_size / 8)
@@ -222,18 +221,18 @@ class ResNetV2Adapter(nn.Module):
         else:
             feat = x
         features.append(feat)  # 1/8 scale, width*8 channels
-        
+
         # Block 3: 1/16 scale (for ViT input)
         x = self.body.block3(x)
-        
+
         # Project to ViT embedding dimension if specified
         if self.output_proj is not None:
             x = self.output_proj(x)
-        
+
         # Return features in reverse order for decoder (from coarse to fine)
         # features: [1/2, 1/4, 1/8] -> reversed: [1/8, 1/4, 1/2]
         return x, features[::-1]
-    
+
     def get_skip_channels(self) -> List[int]:
         """Get the number of channels for each skip connection."""
         return [self.width * 8, self.width * 4, self.width]
@@ -241,7 +240,7 @@ class ResNetV2Adapter(nn.Module):
 
 class Conv2dReLU(nn.Sequential):
     """Convolution layer with batch normalization and ReLU activation."""
-    
+
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
                  padding: int = 0, stride: int = 1, use_batchnorm: bool = True):
         conv = nn.Conv2d(
@@ -260,7 +259,7 @@ class Conv2dReLU(nn.Sequential):
 
 class DecoderBlockWithSkip(nn.Module):
     """Decoder block with skip connection support for CNN adapter."""
-    
+
     def __init__(self, in_channels: int, out_channels: int, skip_channels: int = 0,
                  use_batchnorm: bool = True, scale: float = 2):
         super().__init__()
@@ -304,13 +303,13 @@ class DecoderCupWithSkip(nn.Module):
         decoder_channels (Tuple[int, ...]): Number of channels in each decoder block
         skip_channels (List[int]): Number of channels from CNN adapter skip connections
     """
-    
+
     def __init__(self, emb_dim: int, decoder_channels: Tuple[int, ...] = (256, 128, 64, 16),
                  skip_channels: List[int] = None):
         super().__init__()
         head_channels = 512
         self.decoder_channels = decoder_channels
-        
+
         # Initial convolution to reduce ViT embedding dimension
         self.conv_more = Conv2dReLU(
             emb_dim,
@@ -319,10 +318,10 @@ class DecoderCupWithSkip(nn.Module):
             padding=1,
             use_batchnorm=True,
         )
-        
+
         in_channels = [head_channels] + list(decoder_channels[:-1])
         out_channels = decoder_channels
-        
+
         # Default skip channels if not provided
         if skip_channels is None:
             skip_channels = [0, 0, 0, 0]
@@ -330,18 +329,18 @@ class DecoderCupWithSkip(nn.Module):
             # Pad skip_channels to match decoder depth
             while len(skip_channels) < len(decoder_channels):
                 skip_channels.append(0)
-        
+
         # Create decoder blocks with skip connections
         blocks = []
         scales = [2, 2, 2, 2]  # Default scales
-            
+
         for i, (in_ch, out_ch, sk_ch, scale) in enumerate(zip(in_channels, out_channels, skip_channels, scales)):
             blocks.append(DecoderBlockWithSkip(in_ch, out_ch, sk_ch, scale=scale))
-        
+
         self.blocks = nn.ModuleList(blocks)
         self.skip_channels = skip_channels
 
-    def forward(self, hidden_states: torch.Tensor, 
+    def forward(self, hidden_states: torch.Tensor,
                 skip_features: Optional[List[torch.Tensor]] = None,
                 feature_hw: Optional[Tuple[int, int]] = None) -> torch.Tensor:
         """
@@ -357,25 +356,25 @@ class DecoderCupWithSkip(nn.Module):
             torch.Tensor: Decoded feature maps
         """
         B, n_patch, hidden = hidden_states.size()
-        
+
         # Use provided feature_hw or compute from n_patch (assuming square)
         if feature_hw is not None:
             h, w = feature_hw
         else:
             h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
-        
+
         # Reshape from (B, n_patch, hidden) to (B, hidden, h, w)
         x = hidden_states.permute(0, 2, 1)
         x = x.contiguous().view(B, hidden, h, w)
         x = self.conv_more(x)
-        
+
         # Apply decoder blocks with skip connections
         for i, decoder_block in enumerate(self.blocks):
             skip = None
             if skip_features is not None and i < len(skip_features) and self.skip_channels[i] > 0:
                 skip = skip_features[i]
             x = decoder_block(x, skip=skip)
-            
+
         return x
 
 
@@ -398,7 +397,7 @@ def _get_position_embeddings(model: nn.Module, pfm_name: str, num_patches: int, 
     try:
         # Try to get position embeddings from different PFM structures
         pos_embed = None
-        
+
         if pfm_name in ['virchow_v1', 'virchow_v2']:
             if hasattr(model.pfm, 'pos_embed'):
                 pos_embed = model.pfm.pos_embed
@@ -431,7 +430,7 @@ def _get_position_embeddings(model: nn.Module, pfm_name: str, num_patches: int, 
             # Default: try to find pos_embed directly
             if hasattr(model.pfm, 'pos_embed'):
                 pos_embed = model.pfm.pos_embed
-        
+
         if pos_embed is not None:
             # Check if we need to adjust for CLS token
             # Most ViT models have shape (1, num_patches + 1, emb_dim) where +1 is for CLS token
@@ -443,10 +442,10 @@ def _get_position_embeddings(model: nn.Module, pfm_name: str, num_patches: int, 
                 logger.warning(f"Position embeddings size mismatch: {pos_embed.shape[1]} vs {num_patches}, skipping.")
                 return None
             return pos_embed
-            
+
     except Exception as e:
         logger.warning(f"Could not extract position embeddings from {pfm_name}: {e}")
-    
+
     return None
 
 
@@ -473,12 +472,12 @@ def equip_model_with_cnn_adapter(model: nn.Module, cnn_config: dict) -> nn.Modul
     # Get CNN adapter config
     width_factor = cnn_config.get('width_factor', 1)
     block_units = tuple(cnn_config.get('block_units', [3, 4, 9]))
-    
+
     # Determine model properties
     PFM_name = model.PFM_name
     emb_dim = model.decoder.conv_more[0].in_channels  # Get emb_dim from existing decoder
     decoder_channels = model.decoder_channels
-    
+
     # Create CNN adapter with output projection to ViT embedding dimension
     cnn_adapter = ResNetV2Adapter(
         in_channels=3,
@@ -486,34 +485,34 @@ def equip_model_with_cnn_adapter(model: nn.Module, cnn_config: dict) -> nn.Modul
         block_units=block_units,
         output_channels=emb_dim  # Project CNN output to match ViT embedding dimension
     )
-    
+
     # Get skip channels from CNN adapter
     skip_channels = cnn_adapter.get_skip_channels()
-    
+
     # NOTE: CNN adapter always produces 1/16 scale features (due to ResNet's fixed downsampling pattern:
     # root stride 2 + maxpool stride 2 + block2 stride 2 + block3 stride 2 = 16x total)
     # Therefore, we always need 16x upsampling in the decoder, regardless of ViT's patch_size.
     # Do NOT use special_scale or is_lunit here - those are only for when ViT's patch embedding
     # produces non-1/16 scale features (e.g., patch_size=14 produces 1/14 scale).
-    
+
     # Create new decoder with skip connections
     new_decoder = DecoderCupWithSkip(
         emb_dim=emb_dim,
         decoder_channels=decoder_channels,
         skip_channels=skip_channels,
     )
-    
+
     # Add CNN adapter to model
     model.cnn_adapter = cnn_adapter
-    
+
     # Replace decoder with new decoder that supports skip connections
     model.decoder = new_decoder
-    
+
     # Create learnable position embeddings (following TransUNet design)
     # Default to 224x224 input -> 14x14 patches for 1/16 scale
     # This will be resized during forward if input size differs
     default_num_patches = 14 * 14  # 224 / 16 = 14
-    
+
     # Try to get position embeddings from PFM model, or create new learnable ones
     pos_embed = _get_position_embeddings(model, PFM_name, default_num_patches, emb_dim)
     if pos_embed is not None:
@@ -527,31 +526,31 @@ def equip_model_with_cnn_adapter(model: nn.Module, cnn_config: dict) -> nn.Modul
         nn.init.trunc_normal_(model.cnn_position_embeddings, std=0.02)
         model.position_embeddings_from_pfm = False
         logger.info(f"Created new learnable position embeddings (shape: {model.cnn_position_embeddings.shape})")
-    
+
     # Dropout after adding position embeddings (following TransUNet)
     model.cnn_pos_drop = nn.Dropout(p=0.1)
-    
+
     # Define new forward method that uses CNN adapter
     # Following the same PFM structure handling as pfm_seg_models.py
     def forward_with_cnn_adapter(self, x: torch.Tensor) -> dict:
         # Handle single channel images
         if x.size(1) == 1:
             x = x.repeat(1, 3, 1, 1)
-        
+
         # Step 1: CNN processes image first
         # cnn_features: (B, emb_dim, H/16, W/16), skip_features: list of multi-scale features
         cnn_features, skip_features = self.cnn_adapter(x)
-        
+
         # Step 2: Convert CNN features to token format for ViT
         # (B, emb_dim, H/16, W/16) -> (B, H/16*W/16, emb_dim)
         B, C, H, W = cnn_features.shape
         cnn_tokens = cnn_features.flatten(2).permute(0, 2, 1)  # (B, N, emb_dim)
-        
+
         # Step 2.5: Add position embeddings (following TransUNet design)
         # This is critical for transformer to understand spatial relationships
         num_patches = H * W
         pos_embed = self.cnn_position_embeddings
-        
+
         # Handle size mismatch by interpolating position embeddings
         if pos_embed.shape[1] != num_patches:
             # Resize position embeddings to match current input size
@@ -559,10 +558,10 @@ def equip_model_with_cnn_adapter(model: nn.Module, cnn_config: dict) -> nn.Modul
             pos_embed = pos_embed.reshape(1, -1, int(np.sqrt(pos_embed.shape[2])), int(np.sqrt(pos_embed.shape[2])))
             pos_embed = F.interpolate(pos_embed, size=(H, W), mode='bilinear', align_corners=False)
             pos_embed = pos_embed.flatten(2).permute(0, 2, 1)  # (1, N_new, emb_dim)
-        
+
         cnn_tokens = cnn_tokens + pos_embed
         cnn_tokens = self.cnn_pos_drop(cnn_tokens)
-        
+
         # Step 3: Feed CNN tokens into PFM's transformer blocks
         # Different PFM structures require different access patterns (same as pfm_seg_models.py)
         if self.PFM_name == 'virchow_v1':
@@ -633,20 +632,20 @@ def equip_model_with_cnn_adapter(model: nn.Module, cnn_config: dict) -> nn.Modul
             # Default: assume standard timm ViT structure
             features = self.pfm.blocks(cnn_tokens)
             features = self.pfm.norm(features)
-        
+
         # features: (B, N, emb_dim)
-        
+
         # Step 4: Decode features with CNN skip connections
         decoded_features = self.decoder(features, skip_features)
-        
+
         # Step 5: Generate final predictions
         logits = self.segmentation_head(decoded_features)
-        
+
         return {'out': logits}
-    
+
     # Bind the new forward method to the model
     import types
     model.forward = types.MethodType(forward_with_cnn_adapter, model)
-    
+
     return model
 

@@ -1,7 +1,7 @@
-import copy
 from typing import Any
 
 from transformers import PretrainedConfig
+
 
 class ConchConfig(PretrainedConfig):
     model_type = "conch"

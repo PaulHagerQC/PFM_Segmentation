@@ -14,57 +14,61 @@ Function: Inference for semantic segmentation models
 """
 
 import argparse
-import os
-import sys
-import yaml
-import torch
-import torch.nn.functional as F
-from torch.cuda.amp import autocast
-import numpy as np
-import cv2
 import json
 import logging
-from PIL import Image
-from typing import Dict, Any, List, Tuple
-import tqdm
+import os
+import sys
 import warnings
+from typing import Any, Dict, List, Tuple
+
+import cv2
+import numpy as np
+import torch
+import torch.nn.functional as F
+import tqdm
+import yaml
+from PIL import Image
+from torch.cuda.amp import autocast
+
 warnings.filterwarnings("ignore", category=UserWarning, module='torchvision')
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.seg_dataset import JSONSegmentationDataset
-from data.utils import create_dataloader
 from data.transforms import SegmentationTransforms
-from utils.metrics import SegmentationMetrics
+from data.utils import create_dataloader
 from models import create_segmentation_model
-from utils.visualization import apply_color_map, create_color_palette, put_text_with_bg
 from utils.logs import setup_logging
+from utils.metrics import SegmentationMetrics
+from utils.visualization import apply_color_map, create_color_palette, put_text_with_bg
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments for inference configuration."""
     parser = argparse.ArgumentParser(description='Semantic Segmentation Inference Script')
-    parser.add_argument('--config', type=str, 
+    parser.add_argument('--config', type=str,
                        default='/mnt/sdb/chenwm/PFM_Segmentation/configs/config.yaml',
                        help='Path to config YAML file')
-    parser.add_argument('--checkpoint', type=str, 
+    parser.add_argument('--checkpoint', type=str,
                        default='/mnt/sdb/chenwm/PFM_Segmentation_Output/logs_frozen_01_11/test/checkpoints/',
                        help='Path to model checkpoint file or checkpoint directory')
-    parser.add_argument('--input_json', type=str, 
+    parser.add_argument('--input_json', type=str,
                        default='/mnt/sdb/chenwm/PFM_Segmentation/dataset_json/TNBC.json',
                        help='Path to JSON file containing input data')
-    parser.add_argument('--output_dir', type=str, 
+    parser.add_argument('--output_dir', type=str,
                        default='/mnt/sdb/chenwm/PFM_Segmentation/inference_slidewindow',
                        help='Directory to save inference results')
     parser.add_argument('--device', type=str, default='cuda:6',
                        help='Device for inference (e.g., "cuda:0" or "cpu")')
     parser.add_argument('--input_size', type=int, default=512,
                        help='Input size for resize or window size for sliding window')
-    parser.add_argument('--resize_or_windowslide', type=str, 
+    parser.add_argument('--resize_or_windowslide', type=str,
                        choices=['resize', 'windowslide'], default='resize',
                        help='Inference mode: resize or sliding window')
     parser.add_argument('--batch_size', type=int, default=8,
                        help='Batch size for inference')
+    parser.add_argument('--instance-seg', action='store_true',
+                       help='Run HoVer-Net-style instance segmentation post-processing')
     return parser.parse_args()
 
 
@@ -110,7 +114,7 @@ def resolve_checkpoint_paths(checkpoint_path: str, finetune_mode: str) -> str:
         expected_filename = 'best_decoder_head.pth'
     else:
         raise ValueError(f"Unknown finetune mode: {finetune_mode}")
-    
+
     if os.path.isdir(checkpoint_path):
         # If it's a directory, look for model file
         model_path = os.path.join(checkpoint_path, expected_filename)
@@ -131,7 +135,7 @@ def resolve_checkpoint_paths(checkpoint_path: str, finetune_mode: str) -> str:
             logging.warning(f'Expected filename containing "best_dora_and_decoder_head" for dora mode, got: {filename}')
         elif finetune_mode == 'frozen' and 'best_decoder_head' not in filename:
             logging.warning(f'Expected filename containing "best_decoder_head" for frozen mode, got: {filename}')
-    
+
     return model_path
 
 
@@ -157,13 +161,13 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
     if finetune_mode is None:
         logging.warning('Finetune mode not specified in config, defaulting to full mode')
         finetune_mode = 'full'
-    
+
     # Create model (PFM weights are loaded during model creation)
     model = create_segmentation_model(config['model']).to(device)
-    
+
     # Resolve checkpoint path based on finetune mode
     model_path = resolve_checkpoint_paths(checkpoint_path, finetune_mode)
-    
+
     # Verify checkpoint file exists
     if not os.path.exists(model_path):
         if finetune_mode=='full':
@@ -184,11 +188,11 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
             f'Model checkpoint not found: {model_path}\n'
             f'Expected filename for {finetune_mode} mode: {expected_file}'
         )
-    
+
     # Load checkpoint
     logging.info(f'Loading checkpoint from: {model_path}')
     checkpoint = torch.load(model_path, map_location=device)
-    
+
     # Verify checkpoint matches finetune mode
     checkpoint_finetune_mode = checkpoint.get('finetune_mode', None)
     if checkpoint_finetune_mode is not None and checkpoint_finetune_mode != finetune_mode:
@@ -196,9 +200,9 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
             f'Checkpoint finetune mode mismatch: checkpoint has "{checkpoint_finetune_mode}", '
             f'but config specifies "{finetune_mode}"'
         )
-    
+
     model_state_dict = checkpoint.get('model_state_dict', checkpoint)
-    
+
     if finetune_mode=='full':
         # Full mode: load entire model
         model.load_state_dict(model_state_dict, strict=True)
@@ -208,7 +212,7 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
         model_state = model.state_dict()
         loaded_params = 0
         missing_params = []
-        
+
         for name, param in model_state_dict.items():
             if name.startswith('cnn_adapter.') or name.startswith('decoder.') or name.startswith('segmentation_head.'):
                 if name in model_state:
@@ -221,10 +225,10 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
                 if name in model_state:
                     model_state[name] = param.to(device)
                     loaded_params += 1
-        
+
         if missing_params:
             logging.warning(f'Some CNN adapter/decoder/head parameters not found in model: {missing_params}')
-        
+
         model.load_state_dict(model_state, strict=False)
         logging.info(f'CNN adapter+decoder+head loaded successfully: {loaded_params} parameters')
     elif finetune_mode=='transformer_adapter':
@@ -232,7 +236,7 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
         model_state = model.state_dict()
         loaded_params = 0
         missing_params = []
-        
+
         for name, param in model_state_dict.items():
             if name.startswith('transformer_adapter.') or name.startswith('decoder.') or name.startswith('segmentation_head.'):
                 if name in model_state:
@@ -245,10 +249,10 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
                 if name in model_state:
                     model_state[name] = param.to(device)
                     loaded_params += 1
-        
+
         if missing_params:
             logging.warning(f'Some Transformer adapter/decoder/head parameters not found in model: {missing_params}')
-        
+
         model.load_state_dict(model_state, strict=False)
         logging.info(f'Transformer adapter+decoder+head loaded successfully: {loaded_params} parameters')
     elif finetune_mode == 'lora':
@@ -256,10 +260,10 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
         model_state = model.state_dict()
         loaded_params = 0
         missing_params = []
-        
+
         for name, param in model_state_dict.items():
             # Load lora parameters (lora_a, lora_b in pfm module) and decoder/segmentation_head
-            if ('lora_a' in name or 'lora_b' in name or 
+            if ('lora_a' in name or 'lora_b' in name or
                 name.startswith('decoder.') or name.startswith('segmentation_head.')):
                 if name in model_state:
                     model_state[name] = param.to(device)
@@ -271,10 +275,10 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
                 if name in model_state:
                     model_state[name] = param.to(device)
                     loaded_params += 1
-        
+
         if missing_params:
             logging.warning(f'Some LoRA/decoder/head parameters not found in model: {missing_params}')
-        
+
         model.load_state_dict(model_state, strict=False)
         logging.info(f'LoRA+decoder+head loaded successfully: {loaded_params} parameters')
     elif finetune_mode == 'dora':
@@ -282,11 +286,11 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
         model_state = model.state_dict()
         loaded_params = 0
         missing_params = []
-        
+
         for name, param in model_state_dict.items():
             # Load dora parameters (lora_a, lora_b, m in pfm module) and decoder/segmentation_head
             # Note: use name.endswith('.m') to avoid matching .mlp or other parameters containing 'm'
-            if ('lora_a' in name or 'lora_b' in name or name.endswith('.m') or 
+            if ('lora_a' in name or 'lora_b' in name or name.endswith('.m') or
                 name.startswith('decoder.') or name.startswith('segmentation_head.')):
                 if name in model_state:
                     model_state[name] = param.to(device)
@@ -298,10 +302,10 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
                 if name in model_state:
                     model_state[name] = param.to(device)
                     loaded_params += 1
-        
+
         if missing_params:
             logging.warning(f'Some DoRA/decoder/head parameters not found in model: {missing_params}')
-        
+
         model.load_state_dict(model_state, strict=False)
         logging.info(f'DoRA+decoder+head loaded successfully: {loaded_params} parameters')
     elif finetune_mode == 'frozen':
@@ -309,7 +313,7 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
         model_state = model.state_dict()
         loaded_params = 0
         missing_params = []
-        
+
         for name, param in model_state_dict.items():
             if name.startswith('decoder.') or name.startswith('segmentation_head.'):
                 if name in model_state:
@@ -322,21 +326,21 @@ def load_model(config: Dict[str, Any], checkpoint_path: str, device: torch.devic
                 if name in model_state:
                     model_state[name] = param.to(device)
                     loaded_params += 1
-        
+
         if missing_params:
             logging.warning(f'Some decoder/head parameters not found in model: {missing_params}')
-        
+
         model.load_state_dict(model_state, strict=False)
         logging.info(f'Decoder+head loaded successfully: {loaded_params} parameters')
     else:
         raise ValueError(f"Unknown finetune mode: {finetune_mode}")
-    
+
     model.eval()
     return model
 
 
-def postprocess(image_paths: List[str], pred_masks: List[np.ndarray], 
-               label_paths: List[str], preds_dir: str, overlap_dir: str, 
+def postprocess(image_paths: List[str], pred_masks: List[np.ndarray],
+               label_paths: List[str], preds_dir: str, overlap_dir: str,
                palette: np.ndarray, resize_to_pred_size: bool = False) -> None:
     """
     Post-process and visualize inference results.
@@ -367,7 +371,7 @@ def postprocess(image_paths: List[str], pred_masks: List[np.ndarray],
             # Load and process original image
             original_image = Image.open(image_paths[i]).convert('RGB')
             original_np = np.array(original_image)
-            
+
             # Resize original image to match prediction mask size if needed (only in resize mode)
             if resize_to_pred_size and original_np.shape[:2] != (pred_h, pred_w):
                 original_np = cv2.resize(original_np, (pred_w, pred_h), interpolation=cv2.INTER_LINEAR)
@@ -377,7 +381,7 @@ def postprocess(image_paths: List[str], pred_masks: List[np.ndarray],
             # Resize label mask to match prediction mask size if needed (only in resize mode)
             if resize_to_pred_size and label_mask.shape[:2] != (pred_h, pred_w):
                 label_mask = cv2.resize(label_mask, (pred_w, pred_h), interpolation=cv2.INTER_NEAREST)
-            
+
             label_colored = apply_color_map(label_mask, palette)
             overlay_label = cv2.addWeighted(original_np, 0.5, label_colored, 0.5, 0)
             overlay_pred = cv2.addWeighted(original_np, 0.5, pred_colored, 0.5, 0)
@@ -396,7 +400,7 @@ def postprocess(image_paths: List[str], pred_masks: List[np.ndarray],
 
 def resizeMode_inference(model: torch.nn.Module, dataloader: torch.utils.data.DataLoader,
                         device: torch.device, output_dir: str, palette: np.ndarray, seg_metrics: SegmentationMetrics,
-                        use_amp: bool = False) -> None:
+                        use_amp: bool = False, instance_seg: bool = False) -> None:
     """
     Perform inference using resize-based approach.
     
@@ -412,31 +416,57 @@ def resizeMode_inference(model: torch.nn.Module, dataloader: torch.utils.data.Da
     overlap_dir = os.path.join(output_dir, 'predictions_overlays')
     os.makedirs(preds_dir, exist_ok=True)
     os.makedirs(overlap_dir, exist_ok=True)
+
+    instance_dir = None
+    if instance_seg:
+        from collections import OrderedDict
+        # Import lazily to avoid dependency when not using instance seg
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'src'))
+        from histo.panoptic_segmentation.cellvit_postprocess import (
+            calculate_instance_map,
+        )
+        instance_dir = os.path.join(output_dir, 'instance_maps')
+        os.makedirs(instance_dir, exist_ok=True)
+
     seg_metrics.reset()
     with torch.no_grad():
         for batch in tqdm.tqdm(dataloader, desc="Inference Progress"):
             images = batch['image'].to(device)
             image_paths = batch['image_path']
             label_paths = batch['label_path']
-            # Get resize后的尺寸 (H, W)
             _, _, H, W = images.shape
+
             # Forward pass with optional mixed precision
             if use_amp:
                 with autocast():
-                    preds = model(images)['out']
+                    outputs = model(images)
             else:
-                preds = model(images)['out']
-            
-            # Process predictions - 直接使用resize后的尺寸，不缩放回原图
+                outputs = model(images)
+
+            preds = outputs['out']
+
+            # Process predictions
             pred_masks = [torch.argmax(pred, dim=0).cpu().numpy() for pred in preds]
             _pred_masks = [torch.tensor(mask) for mask in pred_masks]
             if None not in label_paths:
-                # 使用dataloader中已经resize好的标签，确保与训练时一致
-                # 注意：dataloader返回的label已经是resize后的尺寸
-                labels = batch['label'].to(device)  # [B, H, W]
+                labels = batch['label'].to(device)
                 seg_metrics.update(torch.stack(_pred_masks, dim=0).to(device), labels)
 
-            # Save results - 在resize模式下，需要resize原始图像和标签到预测尺寸
+            # Instance segmentation post-processing
+            if instance_seg and 'binary' in outputs and 'hv' in outputs:
+                predictions_dict = OrderedDict()
+                predictions_dict['nuclei_binary_map'] = F.softmax(outputs['binary'], dim=1)
+                predictions_dict['nuclei_type_map'] = F.softmax(outputs['out'], dim=1)
+                predictions_dict['hv_map'] = outputs['hv']
+                num_classes = preds.shape[1]
+                instance_maps, type_preds = calculate_instance_map(
+                    predictions_dict, num_nuclei_classes=num_classes, magnification=20,
+                )
+                for i, img_path in enumerate(image_paths):
+                    basename = os.path.splitext(os.path.basename(img_path))[0]
+                    np.save(os.path.join(instance_dir, f'{basename}.npy'), instance_maps[i])
+
+            # Save semantic results
             postprocess(image_paths, pred_masks, label_paths, preds_dir, overlap_dir, palette, resize_to_pred_size=True)
     return seg_metrics.compute()
 
@@ -513,9 +543,9 @@ def slideWindow_merge(patches_pred: torch.Tensor, window_size: int, stride: int,
     H, W = max_y, max_x
 
     # Initialize output buffers
-    merged = torch.zeros((batch_size, num_classes, H, W), 
+    merged = torch.zeros((batch_size, num_classes, H, W),
                         dtype=patches_pred.dtype, device=device)
-    count = torch.zeros((batch_size, 1, H, W), 
+    count = torch.zeros((batch_size, 1, H, W),
                        dtype=patches_pred.dtype, device=device)
 
     # Accumulate predictions
@@ -573,7 +603,7 @@ def slideWindowMode_inference(model: torch.nn.Module, dataloader: torch.utils.da
             images = batch['image'].to(device)
             batch_size = images.shape[0]
             stride = int(window_size * (1 - overlap))
-            
+
             # Process with sliding window
             patches, coords = slideWindow_preprocess(images, window_size, stride)
             image_paths = batch['image_path']
@@ -599,10 +629,10 @@ def slideWindowMode_inference(model: torch.nn.Module, dataloader: torch.utils.da
 def run_inference(model: torch.nn.Module, dataloader: torch.utils.data.DataLoader,
                  output_dir: str, num_classes: int, device: torch.device,
                  resize_or_windowslide: str, input_size: int, ignore_index: int = 255,
-                 use_amp: bool = False) -> Dict[str, float]:
+                 use_amp: bool = False, instance_seg: bool = False) -> Dict[str, float]:
     """
     Main inference runner that dispatches to appropriate mode.
-    
+
     Args:
         model: Loaded segmentation model
         dataloader: DataLoader providing input batches
@@ -611,14 +641,19 @@ def run_inference(model: torch.nn.Module, dataloader: torch.utils.data.DataLoade
         device: Target device for computation
         resize_or_windowslide: Inference mode ('resize' or 'windowslide')
         input_size: Size parameter (resize dim or window size)
+        ignore_index: Label index to ignore in metrics
+        use_amp: Whether to use mixed precision
+        instance_seg: Whether to run instance segmentation post-processing
     """
     palette = create_color_palette(num_classes)
     os.makedirs(output_dir, exist_ok=True)
     seg_metrics = SegmentationMetrics(num_classes, device=device, ignore_index = ignore_index)
-    
+
     if resize_or_windowslide == 'resize':
-        metrics = resizeMode_inference(model, dataloader, device, output_dir, palette, seg_metrics, use_amp)
+        metrics = resizeMode_inference(model, dataloader, device, output_dir, palette, seg_metrics, use_amp, instance_seg=instance_seg)
     elif resize_or_windowslide == 'windowslide':
+        if instance_seg:
+            logging.warning('Instance segmentation post-processing is not supported in sliding window mode')
         metrics = slideWindowMode_inference(model, dataloader, device, output_dir, palette, seg_metrics, input_size, use_amp=use_amp)
     return metrics
 
@@ -630,16 +665,16 @@ def main() -> None:
     logger = logging.getLogger(__name__)
     config = load_config(args.config)
     device = get_device(args.device)
-    
+
     logger.info("Loading model...")
     model = load_model(config, args.checkpoint, device)
-    
+
     logger.info("Loading transforms...")
     # Get normalization values based on model name
     from data.transforms import get_model_normalization
     pfm_name = config['model'].get('pfm_name', 'unet')
     mean, std = get_model_normalization(pfm_name)
-    
+
     if args.resize_or_windowslide == 'resize':
         test_transforms = SegmentationTransforms.get_validation_transforms(
             img_size=args.input_size,
@@ -675,12 +710,14 @@ def main() -> None:
     # Get use_amp from config (default to training.use_amp if available, otherwise False)
     use_amp = config.get('training', {}).get('use_amp', False)
     logger.info(f'Mixed precision inference: {use_amp}')
+    instance_seg = getattr(args, 'instance_seg', False)
     metrics = run_inference(
-        model, test_dataloader, args.output_dir, 
-        config['model']['num_classes'], device, 
+        model, test_dataloader, args.output_dir,
+        config['model']['num_classes'], device,
         args.resize_or_windowslide, args.input_size,
         config['dataset'].get('ignore_index'),
-        use_amp=use_amp
+        use_amp=use_amp,
+        instance_seg=instance_seg,
     )
     logger.info("Inference completed successfully.")
     logger.info(f'Metrics:{metrics}')

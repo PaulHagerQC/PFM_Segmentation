@@ -10,22 +10,18 @@ Author: @Toby and @chenwm
 Function: Segmentation models using PFMs (pathology foundation models)
 """
 
-import copy
 import logging
-import math
-from os.path import join as pjoin
 from collections import OrderedDict
-import torch
-import torch.nn as nn
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
 import timm
-from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
-from torch.nn.modules.utils import _pair
-from scipy import ndimage
-from typing import Optional, Dict, Any, Tuple
-from .lora import equip_model_with_lora
-from .dora import equip_model_with_dora
+import torch
+import torch.nn as nn
+
 from .cnn_adapter import equip_model_with_cnn_adapter
+from .dora import equip_model_with_dora
+from .lora import equip_model_with_lora
 from .transformer_adapter import equip_model_with_transformer_adapter
 
 logger = logging.getLogger(__name__)
@@ -70,22 +66,22 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
                 "num_classes": 0,
                 "dynamic_img_size": True
             }
-        } 
+        }
         model = timm.create_model("vit_giant_patch14_dinov2", pretrained=False, **gig_config['model_args'])
         state_dict = torch.load(PFM_weights_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state_dict, strict=True)
-        
+
     elif PFM_name == 'uni_v1':
         model = timm.create_model(
-            "vit_large_patch16_224", 
-            img_size=224, 
-            patch_size=16, 
-            init_values=1e-5, 
-            num_classes=0, 
+            "vit_large_patch16_224",
+            img_size=224,
+            patch_size=16,
+            init_values=1e-5,
+            num_classes=0,
             dynamic_img_size=True
         )
         model.load_state_dict(torch.load(PFM_weights_path, map_location='cpu', weights_only=True), strict=True)
-        
+
     elif PFM_name == 'virchow_v1':#CWM
         from timm.layers import SwiGLUPacked
         # Create Virchow v1 model structure
@@ -113,7 +109,7 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
             state_dict = weights
         model.load_state_dict(state_dict, strict=True)
         model = model.eval()
-        
+
     elif PFM_name == 'virchow_v2':
         from timm.layers import SwiGLUPacked
         virchow_v2_config = {
@@ -126,15 +122,15 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
             "dynamic_img_size": True
         }
         model = timm.create_model(
-            "vit_huge_patch14_224", 
+            "vit_huge_patch14_224",
             pretrained=False,
-            mlp_layer=SwiGLUPacked, 
+            mlp_layer=SwiGLUPacked,
             act_layer=torch.nn.SiLU,
             **virchow_v2_config
         )
         state_dict = torch.load(PFM_weights_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state_dict, strict=True)
-        
+
     elif PFM_name == 'patho3dmatrix-vision':
         patho3dmatrix_vision_kwargs = {
             'model_name': 'vit_large_patch16_224',
@@ -148,52 +144,54 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
         state_dict = torch.load(PFM_weights_path, map_location="cpu")
         new_state_dict = OrderedDict({k.replace('backbone.', ''): v for k, v in state_dict['teacher'].items()})
         model.load_state_dict(new_state_dict, strict=False)
-            
+
     elif PFM_name == 'conch_v1':#CWM
         from conch.open_clip_custom import create_model_from_pretrained
         model, _ = create_model_from_pretrained('conch_ViT-B-16', PFM_weights_path)
-            
+
     elif PFM_name == 'conch_v1_5':
         try:
-            from .conch_v1_5_config import ConchConfig
             from .build_conch_v1_5 import build_conch_v1_5
+            from .conch_v1_5_config import ConchConfig
             conch_v1_5_config = ConchConfig()
             model = build_conch_v1_5(conch_v1_5_config, PFM_weights_path)
         except ImportError:
             raise ImportError("Conch V1.5 dependencies not found.")
-            
+
     elif PFM_name == 'uni_v2':
         timm_kwargs = {
-            'img_size': 224, 
-            'patch_size': 14, 
+            'img_size': 224,
+            'patch_size': 14,
             'depth': 24,
             'num_heads': 24,
-            'init_values': 1e-5, 
+            'init_values': 1e-5,
             'embed_dim': 1536,
             'mlp_ratio': 2.66667 * 2,
-            'num_classes': 0, 
+            'num_classes': 0,
             'no_embed_class': True,
-            'mlp_layer': timm.layers.SwiGLUPacked, 
-            'act_layer': torch.nn.SiLU, 
-            'reg_tokens': 8, 
+            'mlp_layer': timm.layers.SwiGLUPacked,
+            'act_layer': torch.nn.SiLU,
+            'reg_tokens': 8,
             'dynamic_img_size': True
         }
         model = timm.create_model('vit_giant_patch14_224', pretrained=False, **timm_kwargs)
         state_dict = torch.load(PFM_weights_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state_dict, strict=True)
-        
+
     elif PFM_name == 'phikon':#CWM
         # Build Phikon ViT-B/16 locally, then load local bin weights (no HF repo needed)
-        from transformers import ViTModel
         import os
+
+        from transformers import ViTModel
         model_dir = os.path.dirname(PFM_weights_path)
         model = ViTModel.from_pretrained(model_dir, add_pooling_layer=False, local_files_only=True)
         model = PhikonWrapper(model)
 
     elif PFM_name == 'phikon_v2':#CWM
         # Phikon v2 uses a different HF repo and model format; load via AutoModel
-        from transformers import AutoModel
         import os
+
+        from transformers import AutoModel
         try:
             model_dir = os.path.dirname(PFM_weights_path)
             model = AutoModel.from_pretrained(model_dir)
@@ -216,7 +214,7 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
             "dynamic_img_size": True
         }
         model = timm.create_model("vit_giant_patch14_reg4_dinov2", **hoptimus_0_config)
-        
+
         try:
             state_dict = torch.load(PFM_weights_path, map_location="cpu", weights_only=True)
             model.load_state_dict(state_dict, strict=True)
@@ -262,14 +260,14 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
             'kaiko-vitb16': {'hf_hub_id': 'vit_base_patch16_224', 'img_size': 224},
             'kaiko-vitl14': {'hf_hub_id': 'vit_large_patch14_reg4_dinov2', 'img_size': 518},
         }
-        
+
         if PFM_name not in kaiko_configs:
             raise ValueError(f"Unknown Kaiko model: {PFM_name}. Available: {list(kaiko_configs.keys())}")
-        
+
         config = kaiko_configs[PFM_name]
         hf_hub_id = config['hf_hub_id']
         img_size = config['img_size']
-        
+
         try:
             model = timm.create_model(
                 hf_hub_id,
@@ -286,8 +284,9 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
 
     elif PFM_name == 'midnight12k':
         # Midnight-12k by Kaiko: Uses AutoModel.from_pretrained with HuggingFace Hub
-        from transformers import AutoModel
         import os
+
+        from transformers import AutoModel
         try:
             model_dir = os.path.dirname(PFM_weights_path)
             model = AutoModel.from_pretrained(model_dir)
@@ -296,7 +295,7 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
                 f"Failed to create Midnight-12k model from local checkpoint at '{PFM_weights_path}'. "
                 "You can download the required `model.safetensors` and `config.json` from: https://huggingface.co/kaiko-ai/midnight."
             )
-        
+
         # Wrap to provide a uniform interface (returns last_hidden_state with CLS token handling)
         model = Midnight12kWrapper(model)
 
@@ -313,8 +312,9 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
 
     elif PFM_name == 'hibou_l':
         # Hibou-Large: uses transformers.AutoModel with trust_remote_code
-        from transformers import AutoModel
         import os
+
+        from transformers import AutoModel
         if PFM_weights_path:
             raise NotImplementedError("Hibou-Large doesn't support local model loading. PR welcome!")
         else:
@@ -322,7 +322,7 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
                 model = AutoModel.from_pretrained("histai/hibou-L", trust_remote_code=True)
             except:
                 raise Exception("Failed to download Hibou-L model, make sure that you were granted access and that you correctly registered your token")
-        
+
 
         # Wrap to provide last_hidden_state as token sequence
         model = HibouWrapper(model)
@@ -330,7 +330,7 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
     elif PFM_name == 'musk':#CWM
         # MUSK: specialized model with custom loading utilities
         try:
-            from musk import utils as musk_utils, modeling
+            from musk import utils as musk_utils
         except Exception:
             raise Exception("Please install MUSK `pip install fairscale git+https://github.com/lilab-stanford/MUSK`")
 
@@ -352,8 +352,8 @@ def get_PFM_model(PFM_name: str, PFM_weights_path: str) -> nn.Module:
 
     elif PFM_name == 'PathOrchestra':
         pathOrchestra_config = {
-            "num_classes": 0, 
-            "init_values": 1e-5, 
+            "num_classes": 0,
+            "init_values": 1e-5,
             "dynamic_img_size": True
         }
         model = timm.create_model(
@@ -376,7 +376,7 @@ class PhikonWrapper(nn.Module):
     This wrapper converts the input tensor format and extracts features properly.
     Supports dynamic image sizes via position encoding interpolation.
     """
-    
+
     def __init__(self, vit_model: nn.Module):
         """
         Initialize Phikon wrapper.
@@ -386,7 +386,7 @@ class PhikonWrapper(nn.Module):
         """
         super(PhikonWrapper, self).__init__()
         self.vit_model = vit_model
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through Phikon model.
@@ -400,13 +400,13 @@ class PhikonWrapper(nn.Module):
         # Phikon expects input in format (B, C, H, W) where values are in [0, 1]
         # Transformers ViTModel expects pixel_values in format (B, C, H, W)
         # The model will handle normalization internally based on its config
-        
+
         # Get outputs from ViTModel with interpolate_pos_encoding=True for dynamic image sizes
         outputs = self.vit_model(pixel_values=x, interpolate_pos_encoding=True)
         # Extract last_hidden_state: (B, num_tokens, hidden_dim)
         features = outputs.last_hidden_state
         return features
-    
+
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass to get features (alias for forward).
@@ -474,10 +474,10 @@ class MuskWrapper(nn.Module):
             out_norm=False,       # Don't normalize output
             ms_aug=False          # Disable multiscale augmentation for segmentation
         )
-        
+
         if vision_cls is None:
             raise RuntimeError("MUSK model returned None for vision features")
-        
+
         if not isinstance(vision_cls, torch.Tensor):
             raise RuntimeError("MUSK model returned non-tensor output; cannot extract features")
 
@@ -488,7 +488,7 @@ class MuskWrapper(nn.Module):
             )
 
         return vision_cls
-    
+
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass to get features (alias for forward).
@@ -566,7 +566,7 @@ class Midnight12kWrapper(nn.Module):
 
 class Conv2dReLU(nn.Sequential):
     """Convolution layer with batch normalization and ReLU activation."""
-    
+
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
                  padding: int = 0, stride: int = 1, use_batchnorm: bool = True):
         conv = nn.Conv2d(
@@ -585,7 +585,7 @@ class Conv2dReLU(nn.Sequential):
 
 class DecoderBlock(nn.Module):
     """Decoder block for upsampling and feature fusion."""
-    
+
     def __init__(self, in_channels: int, out_channels: int, skip_channels: int = 0,
                  use_batchnorm: bool = True, scale: float = 2):
         super().__init__()
@@ -603,7 +603,7 @@ class DecoderBlock(nn.Module):
             padding=1,
             use_batchnorm=use_batchnorm,
         )
-        self.up = nn.UpsamplingBilinear2d(scale_factor=scale) 
+        self.up = nn.UpsamplingBilinear2d(scale_factor=scale)
         # self.up = nn.Upsample(scale_factor=scale, mode='nearest')
 
 
@@ -629,12 +629,12 @@ class SegmentationHead(nn.Sequential):
 
 class DecoderCup(nn.Module):
     """Decoder network for feature reconstruction and upsampling."""
-    
+
     def __init__(self, emb_dim: int, decoder_channels: Tuple[int, ...], is_virchow_v2_or_is_virchow_v1_or_uni_v2_or_midnight_or_hoptimus_or_hibou_or_kaiko: bool = False,is_lunit: bool = False):
         super().__init__()
         head_channels = 512
         self.decoder_channels = decoder_channels
-        
+
         self.conv_more = Conv2dReLU(
             emb_dim,
             head_channels,
@@ -642,22 +642,22 @@ class DecoderCup(nn.Module):
             padding=1,
             use_batchnorm=True,
         )
-        
+
         in_channels = [head_channels] + list(decoder_channels[:-1])
         out_channels = decoder_channels
         skip_channels = [0, 0, 0, 0]  # No skip connections in current implementation
 
         blocks = [
-            DecoderBlock(in_ch, out_ch, sk_ch) 
+            DecoderBlock(in_ch, out_ch, sk_ch)
             for in_ch, out_ch, sk_ch in zip(in_channels, out_channels, skip_channels)
         ]
-        
+
         # Special handling for Virchow v2 model
         if is_virchow_v2_or_is_virchow_v1_or_uni_v2_or_midnight_or_hoptimus_or_hibou_or_kaiko:
             blocks[-1] = DecoderBlock(in_channels[-1], out_channels[-1], skip_channels[-1], scale=1.75)
         if is_lunit:
             blocks[-1] = DecoderBlock(in_channels[-1], out_channels[-1], skip_channels[-1], scale=1)
-            
+
         self.blocks = nn.ModuleList(blocks)
 
     def forward(self, hidden_states: torch.Tensor, features: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -673,15 +673,15 @@ class DecoderCup(nn.Module):
         """
         B, n_patch, hidden = hidden_states.size()
         h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
-        
+
         # Reshape from (B, n_patch, hidden) to (B, hidden, h, w)
         x = hidden_states.permute(0, 2, 1)
         x = x.contiguous().view(B, hidden, h, w)
         x = self.conv_more(x)
-        
+
         for decoder_block in self.blocks:
             x = decoder_block(x, skip=None)
-            
+
         return x
 
 
@@ -698,14 +698,16 @@ class PFMSegmentationModel(nn.Module):
         emb_dim (int): Embedding dimension of the PFM
         num_classes (int): Number of segmentation classes
     """
-    
-    def __init__(self, PFM_name: str, PFM_weights_path: str, emb_dim: int,  num_classes: int = 2):
+
+    def __init__(self, PFM_name: str, PFM_weights_path: str, emb_dim: int,
+                 num_classes: int = 2, instance_seg: bool = False):
         super(PFMSegmentationModel, self).__init__()
-        
+
         self.num_classes = num_classes
         self.PFM_name = PFM_name
+        self.instance_seg = instance_seg
         self.decoder_channels = (256, 128, 64, 16)
-        
+
         # Create decoder
         if PFM_name == 'virchow_v2' or PFM_name == 'virchow_v1' or PFM_name == 'uni_v2' or PFM_name=='midnight12k' or PFM_name=='hoptimus_0' or PFM_name=='hoptimus_1' or PFM_name=='hibou_l' or PFM_name.startswith('kaiko-'):
             self.decoder = DecoderCup(emb_dim, self.decoder_channels, is_virchow_v2_or_is_virchow_v1_or_uni_v2_or_midnight_or_hoptimus_or_hibou_or_kaiko = True)
@@ -713,14 +715,27 @@ class PFMSegmentationModel(nn.Module):
             self.decoder = DecoderCup(emb_dim, self.decoder_channels, is_lunit=True)
         else:
             self.decoder = DecoderCup(emb_dim, self.decoder_channels)
-            
-        # Create segmentation head
+
+        # Create segmentation head (semantic type prediction)
         self.segmentation_head = SegmentationHead(
             in_channels=self.decoder_channels[-1],
             out_channels=num_classes,
             kernel_size=3,
         )
-        
+
+        # Instance segmentation heads (HoVer-Net style)
+        if instance_seg:
+            self.binary_head = SegmentationHead(
+                in_channels=self.decoder_channels[-1],
+                out_channels=2,  # background / foreground
+                kernel_size=3,
+            )
+            self.hv_head = SegmentationHead(
+                in_channels=self.decoder_channels[-1],
+                out_channels=2,  # horizontal / vertical distance
+                kernel_size=3,
+            )
+
         # Load pathology foundation model
         self.pfm = get_PFM_model(PFM_name, PFM_weights_path)
 
@@ -737,7 +752,7 @@ class PFMSegmentationModel(nn.Module):
         # Handle single channel images by repeating to 3 channels
         if x.size(1) == 1:
             x = x.repeat(1, 3, 1, 1)
-        
+
         # Extract features from pathology foundation model
         if self.PFM_name == 'virchow_v1':
             # Skip CLS token and use patch tokens
@@ -785,14 +800,18 @@ class PFMSegmentationModel(nn.Module):
         else:
             # Standard ViT - skip CLS token
             features = self.pfm.forward_features(x)[:, 1:, :]
-        
+
         # Decode features
         decoded_features = self.decoder(features)
-        
+
         # Generate final predictions
-        logits = self.segmentation_head(decoded_features)
-        
-        return {'out': logits}
+        result = {'out': self.segmentation_head(decoded_features)}
+
+        if self.instance_seg:
+            result['binary'] = self.binary_head(decoded_features)
+            result['hv'] = self.hv_head(decoded_features)
+
+        return result
 
     def get_feature_maps(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -807,9 +826,9 @@ class PFMSegmentationModel(nn.Module):
         with torch.no_grad():
             if x.size(1) == 1:
                 x = x.repeat(1, 3, 1, 1)
-                
+
             if self.PFM_name == 'virchow_v1':
-                features = self.pfm(x)[:, 1:, :] 
+                features = self.pfm(x)[:, 1:, :]
             elif self.PFM_name == 'virchow_v2':
                 features = self.pfm(x)[:, 5:, :]
             elif self.PFM_name == 'conch_v1':
@@ -840,12 +859,12 @@ class PFMSegmentationModel(nn.Module):
                 features = self.pfm.forward_features(x)[:, 5:, :]
             else:
                 features = self.pfm.forward_features(x)[:, 1:, :]
-                
+
             # Reshape to spatial format
             B, n_patch, hidden = features.size()
             h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
             features = features.permute(0, 2, 1).contiguous().view(B, hidden, h, w)
-            
+
         return features
 
 
@@ -863,16 +882,18 @@ def create_pfm_segmentation_model(model_config: Dict[str, Any]) -> PFMSegmentati
     for key in required_keys:
         if key not in model_config:
             raise ValueError(f"Missing required configuration key: {key}")
-    
+
     finetune_mode = model_config['finetune_mode'].get('type')
-    
+
     # For all modes, first create the standard model
     pfm_seg_model = PFMSegmentationModel(
         PFM_name=model_config['pfm_name'],
         PFM_weights_path=model_config['pfm_weights_path'],
         emb_dim=model_config['emb_dim'],
-        num_classes=model_config.get('num_classes', 2))
-    
+        num_classes=model_config.get('num_classes', 2),
+        instance_seg=model_config.get('instance_seg', False),
+    )
+
     if finetune_mode == 'frozen':
         for param in pfm_seg_model.pfm.parameters():
             param.requires_grad = False
@@ -924,12 +945,12 @@ def create_segmentation_model(model_config: Dict[str, Any]) -> nn.Module:
     # Check if UNet is requested
     pfm_name = model_config.get('pfm_name', '').lower()
     model_type = model_config.get('model_type', '').lower()
-    
+
     if pfm_name == 'unet' or model_type == 'unet':
         from .unet import create_unet_model
         return create_unet_model(model_config)
     else:
         # Use PFM model
         return create_pfm_segmentation_model(model_config)
-        
+
 

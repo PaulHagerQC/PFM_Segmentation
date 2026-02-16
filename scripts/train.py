@@ -9,42 +9,42 @@ Author: @Toby
 Function: Train a semantic segmentation model using a configuration file.
 """
 import warnings
+
 warnings.filterwarnings("ignore")
 import argparse
+import logging
 import os
+import random
 import sys
-import yaml
+from typing import Any, Dict
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
-import random
-import albumentations as A
-import numpy as np
-import logging
-from typing import Dict, Any
+import yaml
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import create_segmentation_model, count_parameters
-from models.losses import get_loss_function
+from data.seg_dataset import get_dataset
+from data.transforms import SegmentationTransforms
+
 # from data.datasets import get_dataset
 # from data.transforms import get_transforms
 from data.utils import create_dataloader
-from data.transforms import get_transforms,SegmentationTransforms
-from data.seg_dataset import get_dataset
+from models import count_parameters, create_segmentation_model
+from models.losses import get_loss_function
+from utils.logs import setup_logging
 from utils.trainer import SegmentationTrainer
 from utils.visualization import plot_training_history
-from utils.logs import setup_logging
 from utils.yaml_utils import load_config_with_options
-
 
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Training script for semantic segmentation')
-    
+
     parser.add_argument('--config', type=str, default='/mnt/sdb/chenwm/PFM_Segmentation/configs/config.yaml',
                        help='Path to configuration file')
     parser.add_argument('--options',nargs='+',
@@ -53,7 +53,7 @@ def parse_args():
                        help='Path to checkpoint to resume from')
     parser.add_argument('--device', type=str, default='',
                        help='Device to use (cuda/cpu/auto)')
-    
+
     return parser.parse_args()
 
 
@@ -139,14 +139,14 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
     """
     optimizer_config = config['training'].get('optimizer')
     optimizer_type = optimizer_config.get('type', 'SGD').lower()
-    
+
     lr = config['training']['learning_rate']
     weight_decay = config['training']['optimizer'].get('weight_decay', 1e-4)
-    
+
     if optimizer_type == 'sgd':
         momentum = config['training'].get('momentum', 0.9)
         nesterov = optimizer_config.get('nesterov', True)
-        
+
         return optim.SGD(
             model.parameters(),
             lr=lr,
@@ -154,11 +154,11 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
             weight_decay=weight_decay,
             nesterov=nesterov
         )
-    
+
     elif optimizer_type == 'adam':
         betas = optimizer_config.get('betas', (0.9, 0.999))
         eps = optimizer_config.get('eps', 1e-8)
-        
+
         return optim.Adam(
             model.parameters(),
             lr=lr,
@@ -166,11 +166,11 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
             eps=eps,
             weight_decay=weight_decay
         )
-    
+
     elif optimizer_type == 'adamw':
         betas = optimizer_config.get('betas', (0.9, 0.999))
         eps = optimizer_config.get('eps', 1e-8)
-        
+
         return optim.AdamW(
             model.parameters(),
             lr=lr,
@@ -178,7 +178,7 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
             eps=eps,
             weight_decay=weight_decay
         )
-    
+
     else:
         raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
 
@@ -186,19 +186,19 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> optim.Optimize
 def main():
     """Main training function."""
     args = parse_args()
-    
+
     # Load configuration
     config = load_config_with_options(args.config, args.options)
-    
+
     # Set random seed
     seed = config['system'].get('seed', 42)
     set_random_seed(seed)
     generator = torch.Generator()
-    generator.manual_seed(seed) 
-    
+    generator.manual_seed(seed)
+
     # Get device
     device = get_device(args.device,config)
-    
+
     # Setup logging
     log_dir = config['logging'].get('log_dir')
     experiment_name = config['logging'].get('experiment_name')
@@ -207,12 +207,12 @@ def main():
     save_config(config, os.path.join(log_dir, 'config.yaml'))
     setup_logging(log_dir)
     logger = logging.getLogger(__name__)
-    
+
     logger.info("Starting training...")
     logger.info(f"Configuration file: {args.config}")
     logger.info(f"Device: {device}")
     logger.info(f"Random seed: {seed}")
-    
+
     # Create model
     pfm_name = config['model'].get('pfm_name', 'unet')
     model_type = config['model'].get('model_type', '')
@@ -226,27 +226,29 @@ def main():
             logger.info(f"Model finetune-mode: {finetune_mode}")
         model = create_segmentation_model(config['model'])
     model = model.to(device)
-    
+
     # Log model information
     model_params_info_dict = count_parameters(model)
     logger.info(f"Model parameters info: {model_params_info_dict}")
     # Create datasets and data loaders
     logger.info("Creating datasets...")
     dataset_config = config['dataset']
-    
+
     # Training dataset
     # Get normalization values based on model name
     from data.transforms import get_model_normalization
     pfm_name = config['model'].get('pfm_name', 'unet')
     mean, std = get_model_normalization(pfm_name)
+    instance_seg = config['model'].get('instance_seg', False)
     train_transforms = SegmentationTransforms.get_training_transforms(
         img_size=config['training']['augmentation']['RandomResizedCropSize'],
         seed=seed,
         mean=mean,
-        std=std
+        std=std,
+        instance_seg=instance_seg,
     )
     train_dataset = get_dataset(dataset_config, train_transforms, split='train')
-    
+
     train_loader = create_dataloader(
         train_dataset,
         batch_size=config['training']['batch_size'],
@@ -257,15 +259,16 @@ def main():
         worker_init_fn=worker_init_fn,
         drop_last=False,
     )
-    
+
     # Validation dataset
     val_transforms = SegmentationTransforms.get_validation_transforms(
         img_size=config['validation']['augmentation']['ResizedSize'],
         mean=mean,
-        std=std
+        std=std,
+        instance_seg=instance_seg,
     )
     val_dataset = get_dataset(dataset_config, val_transforms, split='val')
-    
+
     val_loader = create_dataloader(
         val_dataset,
         batch_size=config['validation']['batch_size'],
@@ -274,21 +277,21 @@ def main():
         pin_memory=config['system'].get('pin_memory', True),
         drop_last=False
     )
-    
+
     logger.info(f"Training samples: {len(train_dataset)}")
     logger.info(f"Validation samples: {len(val_dataset)}")
     logger.info(f"Training batches: {len(train_loader)}")
     logger.info(f"Validation batches: {len(val_loader)}")
-    
+
     # Create loss function
     logger.info("Creating loss function...")
     criterion = get_loss_function(config['training']['loss'])
     criterion = criterion.to(device)
-    
+
     # Create optimizer
     logger.info("Creating optimizer...")
     optimizer = create_optimizer(model, config)
-    
+
     # Create trainer
     logger.info("Creating trainer...")
     trainer = SegmentationTrainer(
@@ -300,22 +303,22 @@ def main():
         config=config,
         device=device
     )
-    
+
     # Resume from checkpoint if specified
     if args.resume:
         logger.info(f"Resuming from checkpoint: {args.resume}")
         trainer.load_checkpoint(args.resume)
-    
+
     # Start training
-    
+
     trainer.train()
-    
+
     # Plot training history
     logger.info("Generating training history plots...")
     training_stats = trainer.get_training_stats()
-    
+
     history_plot_path = os.path.join(log_dir, 'training_history.png')
-    
+
     plot_training_history(
         train_losses=training_stats['train_losses'],
         val_losses=training_stats['val_losses'],
@@ -323,9 +326,9 @@ def main():
         metric_name='mIoU',
         save_path=history_plot_path
     )
-    
+
     logger.info("Training completed successfully!")
-    
-        
+
+
 if __name__ == "__main__":
     main()

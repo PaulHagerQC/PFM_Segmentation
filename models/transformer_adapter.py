@@ -15,13 +15,12 @@ Reference: DINOv2 Vision Transformer architecture
 Author: @chenwm
 """
 
-import math
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.layers import use_fused_attn, DropPath, Mlp
+from timm.layers import DropPath, Mlp, use_fused_attn
 
 
 class VisionBlockAttention(nn.Module):
@@ -39,7 +38,7 @@ class VisionBlockAttention(nn.Module):
         proj_drop (float): Dropout rate for output projection
         norm_layer (nn.Module): Normalization layer class
     """
-    
+
     def __init__(
         self,
         dim: int,
@@ -66,7 +65,7 @@ class VisionBlockAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
-        
+
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
@@ -116,7 +115,7 @@ class VisionBlock(nn.Module):
         norm_layer (nn.Module): Normalization layer class
         mlp_layer (nn.Module): MLP layer class
     """
-    
+
     def __init__(
         self,
         dim: int,
@@ -133,10 +132,10 @@ class VisionBlock(nn.Module):
         mlp_layer: nn.Module = Mlp,
     ) -> None:
         super().__init__()
-        
+
         # Pre-normalization
         self.norm1 = norm_layer(dim)
-        
+
         # Self-attention
         self.attn = VisionBlockAttention(
             dim=dim,
@@ -147,16 +146,16 @@ class VisionBlock(nn.Module):
             proj_drop=drop,
             norm_layer=norm_layer,
         )
-        
+
         # Layer scale for attention
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
-        
+
         # Drop path for stochastic depth
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         # Pre-normalization for MLP
         self.norm2 = norm_layer(dim)
-        
+
         # MLP (Feed-Forward Network)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = mlp_layer(
@@ -165,10 +164,10 @@ class VisionBlock(nn.Module):
             act_layer=act_layer,
             drop=drop,
         )
-        
+
         # Layer scale for MLP
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
-        
+
         # Drop path for stochastic depth
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
@@ -190,7 +189,7 @@ class LayerScale(nn.Module):
         dim (int): Dimension of the input
         init_values (float): Initial value for the scale parameters
     """
-    
+
     def __init__(self, dim: int, init_values: float = 1e-5) -> None:
         super().__init__()
         self.gamma = nn.Parameter(init_values * torch.ones(dim))
@@ -220,7 +219,7 @@ class TransformerAdapter(nn.Module):
         act_layer (nn.Module): Activation layer class
         norm_layer (nn.Module): Normalization layer class
     """
-    
+
     def __init__(
         self,
         dim: int,
@@ -240,10 +239,10 @@ class TransformerAdapter(nn.Module):
         self.dim = dim
         self.depth = depth
         self.num_heads = num_heads
-        
+
         # Stochastic depth decay rule
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
-        
+
         # Stack of Vision Blocks
         self.blocks = nn.ModuleList([
             VisionBlock(
@@ -261,10 +260,10 @@ class TransformerAdapter(nn.Module):
             )
             for i in range(depth)
         ])
-        
+
         # Final normalization
         self.norm = norm_layer(dim)
-        
+
         # Initialize weights
         self.apply(self._init_weights)
 
@@ -360,7 +359,7 @@ def get_num_heads_from_dim(emb_dim: int) -> int:
     # Standard head_dim is 64 for most ViT models
     head_dim = 64
     num_heads = emb_dim // head_dim
-    
+
     # Ensure num_heads is valid (at least 1 and divides evenly)
     if emb_dim % head_dim != 0:
         # Try common head dimensions
@@ -368,12 +367,12 @@ def get_num_heads_from_dim(emb_dim: int) -> int:
             if emb_dim % hd == 0:
                 num_heads = emb_dim // hd
                 break
-    
+
     return max(1, num_heads)
 
 
 def equip_model_with_transformer_adapter(
-    model: nn.Module, 
+    model: nn.Module,
     adapter_config: Dict[str, Any]
 ) -> nn.Module:
     """
@@ -401,18 +400,18 @@ def equip_model_with_transformer_adapter(
     Returns:
         nn.Module: Model equipped with Transformer Adapter
     """
-    import types
     import logging
-    
+    import types
+
     logger = logging.getLogger(__name__)
-    
+
     # Get PFM model properties - read directly from existing model
     PFM_name = model.PFM_name
     emb_dim = model.decoder.conv_more[0].in_channels  # Get emb_dim from existing decoder
-    
+
     # Get number of tokens to skip (CLS + register tokens)
     skip_tokens = get_skip_tokens(PFM_name)
-    
+
     # Get adapter config
     depth = adapter_config.get('depth', 4)
     mlp_ratio = adapter_config.get('mlp_ratio', 4.0)
@@ -421,12 +420,12 @@ def equip_model_with_transformer_adapter(
     drop_path_rate = adapter_config.get('drop_path_rate', 0.1)
     init_values = adapter_config.get('init_values', 1e-5)
     qk_norm = adapter_config.get('qk_norm', False)
-    
+
     # Get num_heads: from config if provided, otherwise infer from emb_dim
     num_heads = adapter_config.get('num_heads', None)
     if num_heads is None:
         num_heads = get_num_heads_from_dim(emb_dim)
-    
+
     # Create Transformer Adapter
     transformer_adapter = TransformerAdapter(
         dim=emb_dim,
@@ -440,16 +439,16 @@ def equip_model_with_transformer_adapter(
         drop_path_rate=drop_path_rate,
         init_values=init_values,
     )
-    
+
     # Add transformer adapter to model
     model.transformer_adapter = transformer_adapter
-    
+
     # Store skip_tokens for use in forward method
     model._transformer_adapter_skip_tokens = skip_tokens
-    
+
     logger.info(f"Transformer Adapter created: depth={depth}, num_heads={num_heads}, "
                 f"dim={emb_dim}, mlp_ratio={mlp_ratio}, skip_tokens={skip_tokens}")
-    
+
     # Define new forward method that uses transformer adapter
     def forward_with_transformer_adapter(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -464,7 +463,7 @@ def equip_model_with_transformer_adapter(
         # Handle single channel images
         if x.size(1) == 1:
             x = x.repeat(1, 3, 1, 1)
-        
+
         # Step 1: Extract FULL features from frozen PFM (including CLS and register tokens)
         # Different PFM models have different output structures
         if self.PFM_name == 'virchow_v1':
@@ -512,24 +511,24 @@ def equip_model_with_transformer_adapter(
         else:
             # Default: assume standard timm ViT structure
             features = self.pfm.forward_features(x)  # (B, N+1, dim)
-        
+
         # Step 2: Apply Transformer Adapter to ALL tokens (including CLS and register tokens)
         features = self.transformer_adapter(features)
-        
+
         # Step 3: Extract patch tokens (skip CLS and register tokens)
         skip_tokens = self._transformer_adapter_skip_tokens
         patch_features = features[:, skip_tokens:, :]  # (B, N, dim)
-        
+
         # Step 4: Decode features (only patch tokens)
         decoded_features = self.decoder(patch_features)
-        
+
         # Step 5: Generate final predictions
         logits = self.segmentation_head(decoded_features)
-        
+
         return {'out': logits}
-    
+
     # Bind the new forward method to the model
     model.forward = types.MethodType(forward_with_transformer_adapter, model)
-    
+
     return model
 

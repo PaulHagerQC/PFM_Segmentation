@@ -1,14 +1,14 @@
 import math
-import timm
-from timm.layers import use_fused_attn
+from typing import Optional
 
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from einops import repeat
+from timm.layers import use_fused_attn
+
 from .build_conch_v1_5 import Conch_V1_5_Attention
-from typing import Optional
 
 
 class LoRALinear(nn.Module):
@@ -26,8 +26,8 @@ class LoRALinear(nn.Module):
             self.bias = nn.Parameter(torch.empty(out_features))
         else:
             self.register_parameter('bias', None)
-        
-        
+
+
         # LoRA: low-rank adaptor
         self.lora_a = nn.Parameter(torch.zeros(in_features, r), requires_grad=True)
         self.lora_b = nn.Parameter(torch.zeros(r, out_features), requires_grad=True)
@@ -42,10 +42,10 @@ class LoRALinear(nn.Module):
             fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             init.uniform_(self.bias, -bound, bound)
-        
+
         nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
         nn.init.zeros_(self.lora_b)
-    
+
     def forward(self, x):  # shape [10000, 197, 1024]
         # compute original output
         ori_output = F.linear(x, self.weight, self.bias)
@@ -111,7 +111,7 @@ class LoRA_Attention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
-    
+
 
 
 

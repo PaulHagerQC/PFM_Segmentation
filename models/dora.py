@@ -1,14 +1,14 @@
 import math
-import timm
-from timm.layers import use_fused_attn
+from typing import Optional
 
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from einops import repeat
+from timm.layers import use_fused_attn
+
 from .build_conch_v1_5 import Conch_V1_5_Attention
-from typing import Optional
 
 
 class DoraLinear(nn.Module):
@@ -26,7 +26,7 @@ class DoraLinear(nn.Module):
             self.bias = nn.Parameter(torch.empty(out_features), requires_grad=False)
         else:
             self.register_parameter('bias', None)
-        
+
         # LoRA: low-rank adaptor
         # Note: lora_a: [in_features, r], lora_b: [r, out_features]
         # So lora_a @ lora_b: [in_features, r] @ [r, out_features] = [in_features, out_features]
@@ -47,31 +47,31 @@ class DoraLinear(nn.Module):
             fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             init.uniform_(self.bias, -bound, bound)
-        
+
         nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
         nn.init.zeros_(self.lora_b)
 
         # Initialize magnitude to 1
         nn.init.ones_(self.m)
-    
+
     def forward(self, x):  # shape [batch, seq_len, in_features]
         # compute LoRA update: lora_a @ lora_b
         lora_update = self.lora_a @ self.lora_b  # Shape: [in_features, out_features]
-        
+
         # Apply scale
         lora_update = lora_update * self.scale  # Shape: [in_features, out_features]
-        
+
         # compute original weight norm and updated weight norm (Frobenius norm)
         weight_norm = self.weight.norm(p='fro')
         updated_weight = self.weight + lora_update.t()  # Shape: [out_features, in_features]
         updated_norm = updated_weight.norm(p='fro')
-        
+
         # compute direction (unit vector in matrix space)
         direction = updated_weight / updated_norm  # Shape: [out_features, in_features]
-        
+
         # apply Dora: magnitude * direction * original_norm
         dora_weight = self.m * direction * weight_norm
-        
+
         # compute output using Dora-adjusted weight
         output = F.linear(x, dora_weight, self.bias)
         return output

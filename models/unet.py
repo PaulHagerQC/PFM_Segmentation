@@ -8,15 +8,16 @@ Author: @Toby
 Function: UNet segmentation model
 """
 
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Any, Optional
 
 
 class DoubleConv(nn.Module):
     """Double convolution block with batch normalization and ReLU activation."""
-    
+
     def __init__(self, in_channels: int, out_channels: int, mid_channels: Optional[int] = None):
         super(DoubleConv, self).__init__()
         if not mid_channels:
@@ -36,7 +37,7 @@ class DoubleConv(nn.Module):
 
 class Down(nn.Module):
     """Downsampling block: max pooling + double convolution."""
-    
+
     def __init__(self, in_channels: int, out_channels: int):
         super(Down, self).__init__()
         self.maxpool_conv = nn.Sequential(
@@ -50,7 +51,7 @@ class Down(nn.Module):
 
 class Up(nn.Module):
     """Upsampling block: upsampling + concatenation + double convolution."""
-    
+
     def __init__(self, in_channels: int, out_channels: int, bilinear: bool = True):
         super(Up, self).__init__()
 
@@ -79,7 +80,7 @@ class Up(nn.Module):
 
 class OutConv(nn.Module):
     """Output convolution layer."""
-    
+
     def __init__(self, in_channels: int, out_channels: int):
         super(OutConv, self).__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
@@ -97,7 +98,7 @@ class UNet(nn.Module):
         n_classes (int): Number of output classes
         bilinear (bool): Whether to use bilinear upsampling (default: True)
     """
-    
+
     def __init__(self, n_channels: int = 3, n_classes: int = 2, bilinear: bool = True):
         super(UNet, self).__init__()
         self.n_channels = n_channels
@@ -129,7 +130,7 @@ class UNet(nn.Module):
         # Handle single channel images by repeating to 3 channels
         if x.size(1) == 1:
             x = x.repeat(1, 3, 1, 1)
-        
+
         x1 = self.inc(x)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
@@ -160,11 +161,11 @@ def create_unet_model(model_config: Dict[str, Any]) -> UNet:
     """
     if 'num_classes' not in model_config:
         raise ValueError("Missing required configuration key: num_classes")
-    
+
     n_channels = model_config.get('n_channels', 3)
     n_classes = model_config.get('num_classes', 2)
     bilinear = model_config.get('bilinear', True)
-    
+
     model = UNet(n_channels=n_channels, n_classes=n_classes, bilinear=bilinear)
     return model
 

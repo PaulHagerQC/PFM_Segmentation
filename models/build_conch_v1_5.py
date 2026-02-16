@@ -1,30 +1,32 @@
 
+import json
 import logging
 import math
+from enum import Enum
 from functools import partial
-from typing import Callable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from torch.jit import Final
-from torch import einsum
-
-import torchvision.transforms as T
-
-from enum import Enum
 from einops import rearrange, repeat
 from einops_exts import rearrange_many
+from timm.layers import DropPath, Mlp, PatchDropout, trunc_normal_, use_fused_attn
 
 # Imports called in timm's vision_transformer.py
 from timm.layers.helpers import to_2tuple
-from timm.layers import Mlp, DropPath, trunc_normal_, PatchDropout, use_fused_attn
-from timm.models._manipulate import named_apply, checkpoint_seq
+from timm.models._manipulate import checkpoint_seq, named_apply
 
 # Imports of other functions called within timm's vision_transformer.py (that are not defined below)
-from timm.models.vision_transformer import init_weights_vit_timm, get_init_weights_vit, _load_weights
-import json
+from timm.models.vision_transformer import (
+    _load_weights,
+    get_init_weights_vit,
+    init_weights_vit_timm,
+)
+from torch import einsum
+from torch.jit import Final
+
 
 class DotDict(dict):
     def __getattr__(self, attr):
@@ -32,10 +34,10 @@ class DotDict(dict):
         if isinstance(value, dict):
             return DotDict(value)
         return value
-    
+
     def __setattr__(self, attr, value):
         self[attr] = value
-    
+
     def __delattr__(self, attr):
         del self[attr]
 
@@ -117,7 +119,7 @@ class PatchEmbed(nn.Module):
             x = nchw_to(x, self.output_fmt)
         x = self.norm(x)
         return x
-    
+
     def mask_model(self, x, mask):
         x.permute(0, 2, 3, 1)[mask, :] = self.masked_embed.to(x.dtype)
         return x
@@ -235,7 +237,7 @@ class Block(nn.Module):
         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
-    
+
     def forward_with_attention(self, x):
         x_input = x
         x_postattn, attn = self.attn(self.norm1(x_input), return_attention=True)
@@ -281,7 +283,7 @@ class VisionTransformer(nn.Module):
             embed_layer: Callable = PatchEmbed,
             norm_layer: Optional[Callable] = None,
             act_layer: Optional[Callable] = None,
-            block_fn: Callable = Block,     
+            block_fn: Callable = Block,
             mlp_layer: Callable = Mlp,  # New
             return_all_tokens=False,    # iBOT
             masked_im_modeling=False    # iBOT
@@ -484,17 +486,17 @@ class VisionTransformer(nn.Module):
         if return_class_token:
             return tuple(zip(outputs, class_tokens))
         return tuple(outputs)
-    
+
     def forward_features(self, x, mask=None):
         B, nc, w, h = x.shape
-        
+
         ### Specific to iBOT
         if self.masked_im_modeling:
             assert mask is not None
             x = self.patch_embed(x, mask) if self.masked_im_modeling else self.patch_embed(x)
         else:
             x = self.patch_embed(x)
-        
+
         x = self._pos_embed(x, w, h)
         x = self.patch_drop(x)
         x = self.norm_pre(x)
@@ -511,7 +513,7 @@ class VisionTransformer(nn.Module):
         x = self.fc_norm(x)
         x = self.head_drop(x) # new
         return x if pre_logits else self.head(x)
-    
+
     def get_attention(self, x, block_num: int=-1):
         B, nc, w, h = x.shape
         x = self.patch_embed(x)
@@ -521,7 +523,7 @@ class VisionTransformer(nn.Module):
 
         if block_num < 0:
             block_num = len(self.blocks) + block_num
-        
+
         if self.grad_checkpointing and not torch.jit.is_scripting():
             raise NotImplementedError
         else:
@@ -538,17 +540,17 @@ class VisionTransformer(nn.Module):
             x = self.forward_features(x, mask)
         else:
             x = self.forward_features(x)
-        
+
         ### iBOT
         return_all_tokens = self.return_all_tokens if \
             return_all_tokens is None else return_all_tokens
         if return_all_tokens:
             return x
-        
+
         x = self.forward_head(x)
         return x
-    
-    
+
+
     def interpolate_pos_encoding(self, x, w, h):
         npatch = x.shape[1] - 1
         N = self.pos_embed.shape[1] - 1
@@ -591,7 +593,7 @@ def resize_pos_embed(model, pos_embed_w):
                     antialias=antialias,
                     verbose=True,
                 )
-        
+
         resized = True
     if not resized:
         logging.info('pos embedding not resized.')
@@ -664,13 +666,13 @@ class EncoderWithConch_V1_5_AttentionalPooler(nn.Module):
         self.attn_pool_contrast = attn_pooler_contrast
         self.ln_contrast = norm_layer(embed_dim)
         self.global_average_pool = global_average_pool
-    
+
     def _global_pool(self, x):
         if self.global_average_pool:
             return x.mean(dim=1), x
         else:
             return x[:, 0], x[:, 1:]
-    
+
     def forward(self, x):
         x = self.trunk(x, return_all_tokens=True)
         if self.global_average_pool:
@@ -682,26 +684,26 @@ class EncoderWithConch_V1_5_AttentionalPooler(nn.Module):
 
 def build_conch_v1_5(conch_cfg,checkpoint_path):
     model = VisionTransformer(
-        patch_size=conch_cfg.patch_size, 
-        embed_dim=conch_cfg.context_dim, 
-        depth=conch_cfg.depth, 
-        num_heads=conch_cfg.num_heads, 
+        patch_size=conch_cfg.patch_size,
+        embed_dim=conch_cfg.context_dim,
+        depth=conch_cfg.depth,
+        num_heads=conch_cfg.num_heads,
         mlp_ratio=conch_cfg.mlp_ratio,
-        qkv_bias=conch_cfg.qkv_bias, 
+        qkv_bias=conch_cfg.qkv_bias,
         init_values=conch_cfg.init_values
     )
-    attn_pooler_contrast = Conch_V1_5_AttentionalPooler(d_model=conch_cfg.embed_dim, 
-                                            context_dim=conch_cfg.context_dim, 
+    attn_pooler_contrast = Conch_V1_5_AttentionalPooler(d_model=conch_cfg.embed_dim,
+                                            context_dim=conch_cfg.context_dim,
                                             n_queries=conch_cfg.pooler_n_queries_contrast)
-    model = EncoderWithConch_V1_5_AttentionalPooler(encoder=model, 
-                                         attn_pooler_contrast=attn_pooler_contrast, 
+    model = EncoderWithConch_V1_5_AttentionalPooler(encoder=model,
+                                         attn_pooler_contrast=attn_pooler_contrast,
                                          embed_dim=conch_cfg.embed_dim)
     # load pre-trained weights
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(state_dict, strict=True)
-    
+
 
     return model
-    
+
 
 

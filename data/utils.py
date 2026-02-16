@@ -5,18 +5,18 @@ This module contains utility functions for data loading, preprocessing,
 and dataset management.
 """
 
+from typing import Any, Dict, List, Optional
+
+import cv2
+import matplotlib
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-import numpy as np
-from typing import Dict, List, Optional, Tuple, Any, Callable
-import cv2
-from PIL import Image
-import matplotlib
+
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import seaborn as sns
-from collections import Counter
 import os
+
+import matplotlib.pyplot as plt
 
 
 def create_dataloader(dataset, batch_size: int = 8, shuffle: bool = True,
@@ -43,7 +43,7 @@ def create_dataloader(dataset, batch_size: int = 8, shuffle: bool = True,
     if distributed:
         sampler = DistributedSampler(dataset, shuffle=shuffle)
         shuffle = False  # Disable shuffle when using sampler
-    
+
     return DataLoader(
         dataset=dataset,
         batch_size=batch_size,
@@ -61,10 +61,10 @@ def create_dataloader(dataset, batch_size: int = 8, shuffle: bool = True,
 def segmentation_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     """
     Custom collate function for segmentation data.
-    
+
     Args:
         batch (List[Dict[str, Any]]): List of sample dictionaries
-        
+
     Returns:
         Dict[str, torch.Tensor]: Batched data
     """
@@ -73,25 +73,33 @@ def segmentation_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tens
     ori_sizes = []
     image_paths = []
     label_paths = []
-    
+
     for sample in batch:
         images.append(sample['image'])
         labels.append(sample['label'])
         image_paths.append(sample['image_path'])
         label_paths.append(sample['label_path'])
         ori_sizes.append(sample['ori_size'])
-    
+
     # Stack images and labels
     images = torch.stack(images, dim=0)
     labels = torch.stack(labels, dim=0)
-    
-    return {
+
+    result = {
         'image': images,
         'label': labels,
         'ori_size': ori_sizes,
         'image_path': image_paths,
         'label_path': label_paths
     }
+
+    # Instance segmentation targets (binary mask and HV map)
+    if 'binary_mask' in batch[0]:
+        result['binary_mask'] = torch.stack([s['binary_mask'] for s in batch], dim=0)
+    if 'hv_map' in batch[0]:
+        result['hv_map'] = torch.stack([s['hv_map'] for s in batch], dim=0)
+
+    return result
 
 
 def compute_class_distribution(dataset, num_classes: int, ignore_index: int = 255) -> Dict[str, Any]:
@@ -108,24 +116,24 @@ def compute_class_distribution(dataset, num_classes: int, ignore_index: int = 25
     """
     class_counts = np.zeros(num_classes, dtype=np.int64)
     total_pixels = 0
-    
+
     print("Computing class distribution...")
     for i, sample in enumerate(dataset):
         if i % 100 == 0:
             print(f"Processed {i}/{len(dataset)} samples")
-            
+
         label = sample['label'].numpy()
         mask = (label != ignore_index)
-        
+
         for c in range(num_classes):
             class_counts[c] += np.sum(label == c)
         total_pixels += np.sum(mask)
-    
+
     # Compute statistics
     class_frequencies = class_counts / total_pixels
     class_weights = 1.0 / (class_frequencies + 1e-8)
     class_weights = class_weights / class_weights.sum() * num_classes
-    
+
     return {
         'class_counts': class_counts,
         'class_frequencies': class_frequencies,
@@ -145,12 +153,12 @@ def visualize_class_distribution(class_stats: Dict[str, Any], class_names: Optio
         save_path (Optional[str]): Path to save the plot
     """
     num_classes = len(class_stats['class_counts'])
-    
+
     if class_names is None:
         class_names = [f"Class {i}" for i in range(num_classes)]
-    
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
+
     # Plot class counts
     bars1 = ax1.bar(range(num_classes), class_stats['class_counts'])
     ax1.set_xlabel('Class')
@@ -158,13 +166,13 @@ def visualize_class_distribution(class_stats: Dict[str, Any], class_names: Optio
     ax1.set_title('Class Distribution (Pixel Counts)')
     ax1.set_xticks(range(num_classes))
     ax1.set_xticklabels(class_names, rotation=45, ha='right')
-    
+
     # Add value labels on bars
     for i, bar in enumerate(bars1):
         height = bar.get_height()
         ax1.text(bar.get_x() + bar.get_width()/2., height,
                 f'{int(height):,}', ha='center', va='bottom', fontsize=8)
-    
+
     # Plot class frequencies
     bars2 = ax2.bar(range(num_classes), class_stats['class_frequencies'])
     ax2.set_xlabel('Class')
@@ -172,19 +180,19 @@ def visualize_class_distribution(class_stats: Dict[str, Any], class_names: Optio
     ax2.set_title('Class Distribution (Frequencies)')
     ax2.set_xticks(range(num_classes))
     ax2.set_xticklabels(class_names, rotation=45, ha='right')
-    
+
     # Add value labels on bars
     for i, bar in enumerate(bars2):
         height = bar.get_height()
         ax2.text(bar.get_x() + bar.get_width()/2., height,
                 f'{height:.3f}', ha='center', va='bottom', fontsize=8)
-    
+
     plt.tight_layout()
-    
+
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Class distribution plot saved to: {save_path}")
-    
+
     plt.show()
 
 
@@ -201,59 +209,59 @@ def visualize_sample(sample: Dict[str, torch.Tensor], class_colors: Optional[Lis
     """
     image = sample['image']
     label = sample['label']
-    
+
     # Convert tensors to numpy arrays
     if isinstance(image, torch.Tensor):
         if image.dim() == 3:  # C, H, W
             image = image.permute(1, 2, 0)
         image = image.numpy()
-        
+
     if isinstance(label, torch.Tensor):
         label = label.numpy()
-    
+
     # Denormalize image if needed
     if image.max() <= 1.0:
         image = (image * 255).astype(np.uint8)
-    
+
     # Create colored label map
     if class_colors is None:
         # Generate random colors
         num_classes = int(label.max()) + 1
         class_colors = plt.cm.tab20(np.linspace(0, 1, num_classes))[:, :3] * 255
         class_colors = class_colors.astype(np.uint8)
-    
+
     colored_label = np.zeros((*label.shape, 3), dtype=np.uint8)
     for class_id, color in enumerate(class_colors):
         colored_label[label == class_id] = color
-    
+
     # Create overlay
     alpha = 0.6
     overlay = cv2.addWeighted(image, 1 - alpha, colored_label, alpha, 0)
-    
+
     # Create visualization
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
+
     # Original image
     axes[0].imshow(image)
     axes[0].set_title('Original Image')
     axes[0].axis('off')
-    
+
     # Label map
     axes[1].imshow(colored_label)
     axes[1].set_title('Label Map')
     axes[1].axis('off')
-    
+
     # Overlay
     axes[2].imshow(overlay)
     axes[2].set_title('Overlay')
     axes[2].axis('off')
-    
+
     plt.tight_layout()
-    
+
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Sample visualization saved to: {save_path}")
-    
+
     plt.show()
 
 
@@ -273,12 +281,12 @@ def create_color_map(num_classes: int) -> np.ndarray:
         hue = i / num_classes
         saturation = 0.7 + 0.3 * (i % 2)  # Alternate between high and higher saturation
         value = 0.8 + 0.2 * ((i // 2) % 2)  # Alternate brightness
-        
+
         # Convert HSV to RGB
         hsv = np.array([hue, saturation, value]).reshape(1, 1, 3)
         rgb = cv2.cvtColor((hsv * 255).astype(np.uint8), cv2.COLOR_HSV2RGB)[0, 0]
         colors.append(rgb)
-    
+
     return np.array(colors)
 
 
@@ -295,47 +303,47 @@ def analyze_dataset_quality(dataset, sample_ratio: float = 0.1) -> Dict[str, Any
     """
     num_samples = int(len(dataset) * sample_ratio)
     indices = np.random.choice(len(dataset), num_samples, replace=False)
-    
+
     image_sizes = []
     label_coverage = []  # Percentage of labeled pixels
     class_diversity = []  # Number of unique classes per image
-    
+
     print(f"Analyzing dataset quality on {num_samples} samples...")
-    
+
     for i, idx in enumerate(indices):
         if i % 50 == 0:
             print(f"Processed {i}/{num_samples} samples")
-            
+
         sample = dataset[idx]
         image = sample['image']
         label = sample['label']
-        
+
         # Image size
         if isinstance(image, torch.Tensor):
             h, w = image.shape[-2:]
         else:
             h, w = image.shape[:2]
         image_sizes.append((h, w))
-        
+
         # Label coverage
         if isinstance(label, torch.Tensor):
             label_np = label.numpy()
         else:
             label_np = label
-            
+
         valid_pixels = np.sum(label_np != 255)  # Assuming 255 is ignore_index
         total_pixels = label_np.size
         coverage = valid_pixels / total_pixels
         label_coverage.append(coverage)
-        
+
         # Class diversity
         unique_classes = len(np.unique(label_np[label_np != 255]))
         class_diversity.append(unique_classes)
-    
+
     # Compute statistics
     unique_sizes = list(set(image_sizes))
     size_consistency = len(unique_sizes) == 1
-    
+
     return {
         'num_samples_analyzed': num_samples,
         'unique_image_sizes': unique_sizes,
@@ -359,7 +367,7 @@ def save_dataset_info(dataset, output_dir: str, dataset_name: str = "dataset") -
         dataset_name (str): Name of the dataset
     """
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Basic info
     info = {
         'dataset_name': dataset_name,
@@ -367,28 +375,28 @@ def save_dataset_info(dataset, output_dir: str, dataset_name: str = "dataset") -
         'num_classes': getattr(dataset, 'num_classes', 'unknown'),
         'ignore_index': getattr(dataset, 'ignore_index', 255)
     }
-    
+
     # Save basic info
     import json
     with open(os.path.join(output_dir, f'{dataset_name}_info.json'), 'w') as f:
         json.dump(info, f, indent=2)
-    
+
     # Compute and save class distribution
     if hasattr(dataset, 'num_classes'):
         class_stats = compute_class_distribution(dataset, dataset.num_classes)
-        
+
         # Save class statistics
-        np.save(os.path.join(output_dir, f'{dataset_name}_class_counts.npy'), 
+        np.save(os.path.join(output_dir, f'{dataset_name}_class_counts.npy'),
                 class_stats['class_counts'])
-        np.save(os.path.join(output_dir, f'{dataset_name}_class_weights.npy'), 
+        np.save(os.path.join(output_dir, f'{dataset_name}_class_weights.npy'),
                 class_stats['class_weights'])
-        
+
         # Save class distribution plot
         visualize_class_distribution(
-            class_stats, 
+            class_stats,
             save_path=os.path.join(output_dir, f'{dataset_name}_class_distribution.png')
         )
-    
+
     # Dataset quality analysis
     quality_stats = analyze_dataset_quality(dataset)
     with open(os.path.join(output_dir, f'{dataset_name}_quality.json'), 'w') as f:
@@ -402,11 +410,11 @@ def save_dataset_info(dataset, output_dir: str, dataset_name: str = "dataset") -
             else:
                 quality_stats_serializable[k] = v
         json.dump(quality_stats_serializable, f, indent=2)
-    
+
     print(f"Dataset information saved to: {output_dir}")
 
 
-def create_data_split(image_dir: str, label_dir: str, 
+def create_data_split(image_dir: str, label_dir: str,
                      train_ratio: float = 0.7, val_ratio: float = 0.2, test_ratio: float = 0.1,
                      output_dir: str = "splits", seed: int = 42) -> None:
     """
@@ -423,69 +431,69 @@ def create_data_split(image_dir: str, label_dir: str,
     """
     import random
     import shutil
-    
+
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Ratios must sum to 1.0"
-    
+
     # Get all image files
     image_files = [f for f in os.listdir(image_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-    
+
     # Filter files that have corresponding labels
     valid_files = []
     for img_file in image_files:
         label_file = img_file.replace('.jpg', '.png').replace('.jpeg', '.png')
         if os.path.exists(os.path.join(label_dir, label_file)):
             valid_files.append(img_file)
-    
+
     print(f"Found {len(valid_files)} valid image-label pairs")
-    
+
     # Shuffle files
     random.seed(seed)
     random.shuffle(valid_files)
-    
+
     # Compute split indices
     num_files = len(valid_files)
     train_end = int(num_files * train_ratio)
     val_end = train_end + int(num_files * val_ratio)
-    
+
     # Split files
     train_files = valid_files[:train_end]
     val_files = valid_files[train_end:val_end]
     test_files = valid_files[val_end:]
-    
+
     print(f"Split: Train={len(train_files)}, Val={len(val_files)}, Test={len(test_files)}")
-    
+
     # Create output directories
     for split in ['train', 'val', 'test']:
         os.makedirs(os.path.join(output_dir, 'images', split), exist_ok=True)
         os.makedirs(os.path.join(output_dir, 'labels', split), exist_ok=True)
-    
+
     # Copy files to respective directories
     for split, files in [('train', train_files), ('val', val_files), ('test', test_files)]:
         for img_file in files:
             label_file = img_file.replace('.jpg', '.png').replace('.jpeg', '.png')
-            
+
             # Copy image
             shutil.copy2(
                 os.path.join(image_dir, img_file),
                 os.path.join(output_dir, 'images', split, img_file)
             )
-            
+
             # Copy label
             shutil.copy2(
                 os.path.join(label_dir, label_file),
                 os.path.join(output_dir, 'labels', split, label_file)
             )
-    
+
     print(f"Data split created in: {output_dir}")
 
 
 if __name__ == "__main__":
     # Test utilities
     print("Testing data utilities...")
-    
+
     # Test color map creation
     color_map = create_color_map(19)
     print(f"Created color map with shape: {color_map.shape}")
-    
+
     # Test other functions would require actual dataset
     print("Data utilities module loaded successfully!")

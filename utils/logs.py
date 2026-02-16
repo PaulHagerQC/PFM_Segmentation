@@ -1,13 +1,14 @@
-import os
 import logging
+import os
 import sys
+
 
 def setup_logging(log_dir: str):
     """Setup logging configuration."""
     os.makedirs(log_dir, exist_ok=True)
-    
+
     level = logging.INFO
-    
+
     logging.basicConfig(
         level=level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
